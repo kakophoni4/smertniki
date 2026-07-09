@@ -17,7 +17,7 @@ from app.services.monitor import (
     issue_label,
     rusprofile_url,
 )
-from app.services.rusprofile_client import RusprofileClient
+from app.services.rusprofile_client import RusprofileClient, normalize_inn
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +82,10 @@ async def cmd_start(message: Message, session: AsyncSession) -> None:
         admin_block = (
             "\nАдмин:\n"
             "/add_company ОГРН — добавить лавку\n"
-            "/add_companies — пакет (по одному ОГРН/строке)\n"
-            "/import_file — загрузить .txt со списком ОГРН\n"
+            "/add_companies — пакет ОГРН\n"
+            "/import_file — .txt со списком ОГРН\n"
+            "/resolve_inn ИНН — ИНН→ОГРН (не добавляет в мониторинг)\n"
+            "/resolve_inns — пакет ИНН→ОГРН\n"
             "/remove_company ОГРН — удалить\n"
             "/list_companies — список\n"
             "/add_user ID — выдать доступ\n"
@@ -175,6 +177,95 @@ async def cmd_tickets(message: Message, session: AsyncSession) -> None:
         disp = company_display(company) if company else f"company#{t.company_id}"
         lines.append(f"#{t.id} — {issue_label(t.issue_type)}\n{disp}\n")
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("resolve_inn"))
+async def cmd_resolve_inn(message: Message, session: AsyncSession, client: RusprofileClient) -> None:
+    user = await require_admin(message, session)
+    if not user:
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(
+            "Использование: /resolve_inn ИНН\n\n"
+            "Только резолв ИНН→ОГРН. В мониторинг не добавляет.\n"
+            "Потом: /add_company ОГРН"
+        )
+        return
+
+    inn = normalize_inn(parts[1])
+    if not inn:
+        await message.answer("Некорректный ИНН (нужно 10 или 12 цифр).")
+        return
+
+    await message.answer(f"Ищу ОГРН для ИНН {inn}…")
+    result = await client.resolve_inn(inn)
+    if not result.ogrn:
+        await message.answer(f"❌ ИНН {inn}: {result.error}")
+        return
+
+    name = result.name or "—"
+    await message.answer(
+        f"✅ ИНН {inn}\n"
+        f"ОГРН: `{result.ogrn}`\n"
+        f"{name}\n"
+        f"https://www.rusprofile.ru/id/{result.ogrn}\n\n"
+        f"Добавить: /add_company {result.ogrn}",
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+
+@router.message(Command("resolve_inns"))
+async def cmd_resolve_inns(message: Message, session: AsyncSession, client: RusprofileClient) -> None:
+    user = await require_admin(message, session)
+    if not user:
+        return
+
+    text = (message.text or "").split(maxsplit=1)
+    if len(text) < 2:
+        await message.answer(
+            "Отправь:\n/resolve_inns\n9731112429\n9726027672\n…\n\n"
+            "Вернёт список ОГРН. В мониторинг не добавляет."
+        )
+        return
+
+    raw = text[1].replace(",", " ").replace(";", " ")
+    inns = [normalize_inn(x) for x in raw.split()]
+    inns = list(dict.fromkeys(x for x in inns if x))
+    if not inns:
+        await message.answer("ИНН не найдены.")
+        return
+
+    await message.answer(f"Резолвлю {len(inns)} ИНН… (~{int(len(inns) * settings.request_delay_sec / 60)} мин)")
+    lines: list[str] = []
+    ogrn_lines: list[str] = []
+    for inn in inns:
+        result = await client.resolve_inn(inn)
+        if result.ogrn:
+            lines.append(f"✅ {inn} → {result.ogrn}")
+            ogrn_lines.append(result.ogrn)
+        else:
+            lines.append(f"❌ {inn} — {result.error}")
+
+    # Telegram лимит ~4096, режем
+    chunk: list[str] = []
+    size = 0
+    for line in lines:
+        if size + len(line) + 1 > 3500:
+            await message.answer("\n".join(chunk))
+            chunk, size = [], 0
+        chunk.append(line)
+        size += len(line) + 1
+    if chunk:
+        await message.answer("\n".join(chunk))
+
+    if ogrn_lines:
+        await message.answer(
+            "ОГРН для импорта (скопируй в /add_companies):\n\n" + "\n".join(ogrn_lines[:100])
+            + ("\n…" if len(ogrn_lines) > 100 else "")
+        )
 
 
 @router.message(Command("add_company"))

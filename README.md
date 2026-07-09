@@ -48,8 +48,11 @@ python -m app.main
 **Все пользователи:** `/start`, `/status`, `/tickets`
 
 **Админ:**
-- `/add_company ОГРН` — добавить лавку
+- `/add_company ОГРН` — добавить лавку в мониторинг
 - `/add_companies` + список ОГРН — пакетная загрузка
+- `/import_file` + `.txt` — импорт ОГРН
+- `/resolve_inn ИНН` — **только** ИНН→ОГРН (в мониторинг не кладёт)
+- `/resolve_inns` + список ИНН — пакетный резолв
 - `/remove_company ОГРН` — убрать из мониторинга (уведомление всем)
 - `/list_companies` — список
 - `/add_user ID` / `/remove_user ID` / `/list_users` — ACL
@@ -58,6 +61,21 @@ python -m app.main
 - `/check ОГРН` — одна компания
 
 Первый `/start` от id из `ADMIN_IDS` автоматически создаёт админа в БД.
+
+## Если есть список ИНН, а не ОГРН
+
+Мониторинг работает **только по ОГРН** (карточка Rusprofile = `/id/{ОГРН}`).
+
+Отдельный шаг резолва:
+
+```bash
+# на сервере / локально
+python scripts/resolve_inn.py --file inns.txt --out ogrns.txt --csv mapping.csv
+# потом в боте:
+# /import_file  + ogrns.txt
+```
+
+Или в Telegram: `/resolve_inns` → скопировать ОГРН → `/add_companies`.
 
 ## Деплой на сервер
 
