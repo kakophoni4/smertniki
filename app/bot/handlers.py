@@ -449,7 +449,7 @@ async def on_list_shops(message: Message, session: AsyncSession) -> None:
     if not await require_admin(message, session):
         return
     companies = (
-        await session.scalars(select(Company).where(Company.is_active.is_(True)).order_by(Company.id).limit(100))
+        await session.scalars(select(Company).where(Company.is_active.is_(True)).order_by(Company.id))
     ).all()
     if not companies:
         await message.answer("Список пуст.", reply_markup=shops_menu())
