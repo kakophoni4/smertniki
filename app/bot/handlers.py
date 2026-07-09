@@ -82,6 +82,16 @@ async def ensure_user(session: AsyncSession, message: Message) -> AllowedUser | 
     tg_id = message.from_user.id
     user = await session.scalar(select(AllowedUser).where(AllowedUser.telegram_id == tg_id))
     if user and user.is_active:
+        # диалог есть — можно снова слать алерты
+        changed = False
+        if not user.notify:
+            user.notify = True
+            changed = True
+        if message.from_user.username and user.username != message.from_user.username:
+            user.username = message.from_user.username
+            changed = True
+        if changed:
+            await session.commit()
         return user
     if is_config_admin(tg_id):
         if not user:
@@ -98,6 +108,7 @@ async def ensure_user(session: AsyncSession, message: Message) -> AllowedUser | 
         elif not user.is_active:
             user.is_active = True
             user.role = UserRole.ADMIN
+            user.notify = True
             await session.commit()
         return user
     return None
