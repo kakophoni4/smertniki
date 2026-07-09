@@ -1,3 +1,5 @@
+import html as html_lib
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,12 +53,61 @@ class CompanySnapshot:
 def _norm(text: str | None) -> str:
     if not text:
         return ""
+    text = html_lib.unescape(text)
     return " ".join(text.split()).strip()
 
 
 def _contains_any(haystack: str, needles: list[str]) -> bool:
     low = haystack.lower()
     return any(n.lower() in low for n in needles)
+
+
+def _extract_name(soup: BeautifulSoup) -> tuple[str | None, str | None]:
+    """Имя только из шапки карточки — не из «похожих» / топа отрасли."""
+    header = soup.select_one(".company-header") or soup.select_one("#main.company-main") or soup
+
+    short = None
+    h1 = header.select_one("h1[itemprop='name']") or header.select_one(".company-header__title h1") or header.find("h1")
+    if h1:
+        short = _norm(h1.get_text(" ", strip=True))
+
+    full = None
+    for sel in (
+        ".company-header__full-name",
+        ".company-header__full",
+        "[itemprop='legalName']",
+    ):
+        el = header.select_one(sel)
+        if el:
+            candidate = _norm(el.get_text(" ", strip=True))
+            if candidate:
+                full = candidate
+                break
+
+    # title как запасной вариант: 'ООО "Прорва" Москва (ИНН ...)'
+    if not short:
+        title = soup.find("title")
+        if title:
+            t = _norm(title.get_text())
+            m = re.match(r'^(.+?)\s+Москва\b', t) or re.match(r'^(.+?)\s+\(ИНН', t)
+            if m:
+                short = _norm(m.group(1))
+
+    return full or short, short or full
+
+
+def _extract_inn(soup: BeautifulSoup, page_text: str) -> str | None:
+    # точный clip_inn с карточки
+    clip = soup.select_one("#clip_inn")
+    if clip:
+        digits = re.sub(r"\D", "", clip.get_text())
+        if len(digits) in (10, 12):
+            return digits
+
+    m = re.search(r"ИНН[/КПП\s]*([0-9]{10,12})", page_text)
+    if m:
+        return m.group(1)[:12]
+    return None
 
 
 def parse_company_html(html: str, ogrn: str) -> CompanySnapshot:
@@ -71,48 +122,12 @@ def parse_company_html(html: str, ogrn: str) -> CompanySnapshot:
     snap = CompanySnapshot(ogrn=ogrn)
     page_text = _norm(soup.get_text(" ", strip=True))
 
-    # --- имя ---
-    h1 = soup.find("h1")
-    if h1:
-        snap.short_name = _norm(h1.get_text())
-        snap.name = snap.short_name
+    # страница должна быть именно этой карточкой
+    if ogrn not in html and ogrn not in page_text:
+        raise ValueError(f"В HTML нет ОГРН {ogrn} — похоже, не та страница / блок")
 
-    # иногда полное имя рядом
-    for sel in [".company-header__full", ".company-name", "[itemprop='legalName']"]:
-        el = soup.select_one(sel)
-        if el and _norm(el.get_text()):
-            snap.name = _norm(el.get_text())
-            break
-
-    # --- ИНН ---
-    inn_match = None
-    for pattern in [
-        soup.find(string=lambda t: isinstance(t, str) and "ИНН" in t),
-    ]:
-        if pattern:
-            parent = pattern.parent
-            chunk = _norm(parent.get_text() if parent else str(pattern))
-            digits = "".join(ch for ch in chunk if ch.isdigit())
-            # ИНН 10 или 12 цифр
-            for length in (10, 12):
-                if len(digits) >= length:
-                    candidate = digits[:length]
-                    if candidate.startswith(("77", "50", "97", "78", "66", "54", "16", "02")) or len(candidate) in (
-                        10,
-                        12,
-                    ):
-                        inn_match = candidate
-                        break
-            if not inn_match and len(digits) >= 10:
-                inn_match = digits[:10]
-    # fallback regex-like scan
-    if not inn_match:
-        import re
-
-        m = re.search(r"ИНН[/КПП\s]*([0-9]{10,12})", page_text)
-        if m:
-            inn_match = m.group(1)[:12]
-    snap.inn = inn_match
+    snap.name, snap.short_name = _extract_name(soup)
+    snap.inn = _extract_inn(soup, page_text)
 
     # --- адрес ---
     addr_el = soup.select_one("[itemprop='address'], .company-info__address, .tile-item__addr")

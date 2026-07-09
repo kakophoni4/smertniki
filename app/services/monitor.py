@@ -69,8 +69,11 @@ async def apply_snapshot(session: AsyncSession, company: Company, snap: CompanyS
     curr = snapshot_issues(snap)
 
     company.inn = snap.inn or company.inn
-    company.name = snap.name or company.name
-    company.short_name = snap.short_name or company.short_name
+    # имя всегда перезаписываем свежим с карточки (если распарсили)
+    if snap.name:
+        company.name = snap.name
+    if snap.short_name:
+        company.short_name = snap.short_name
     company.address = snap.address or company.address
     company.status_text = snap.status_text
     company.unreliable_address = snap.unreliable_address
