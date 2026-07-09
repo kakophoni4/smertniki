@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -11,8 +12,8 @@ from app.parser.rusprofile import CompanySnapshot, parse_company_html
 logger = logging.getLogger(__name__)
 
 OGRN_IN_URL_RE = re.compile(r"/id/(\d{13,15})\b")
-OGRN_IN_TEXT_RE = re.compile(r"ОГРН\s*[:\s]?\s*(\d{13,15})", re.IGNORECASE)
 INN_RE = re.compile(r"^\d{10}(\d{2})?$")
+AJAX_SEARCH = "https://www.rusprofile.ru/ajax.php"
 
 
 def rusprofile_url(ogrn: str) -> str:
@@ -34,28 +35,46 @@ class InnResolveResult:
 
 
 def extract_ogrn_from_search_html(html: str, final_url: str = "") -> str | None:
+    """Fallback для HTML (основной путь — ajax JSON)."""
     m = OGRN_IN_URL_RE.search(final_url or "")
     if m:
         return m.group(1)
-
     ids = OGRN_IN_URL_RE.findall(html)
-    if ids:
-        return ids[0]
-
-    m = OGRN_IN_TEXT_RE.search(html)
-    if m:
-        return m.group(1)
-    return None
+    return ids[0] if ids else None
 
 
-def extract_name_near_ogrn(html: str, ogrn: str) -> str | None:
-    m = re.search(r"<h1[^>]*>(.*?)</h1>", html, flags=re.IGNORECASE | re.DOTALL)
-    if m:
-        name = re.sub(r"<[^>]+>", "", m.group(1))
-        name = " ".join(name.split()).strip()
-        if name:
-            return name
-    return None
+def parse_ajax_search(payload: dict, inn: str) -> InnResolveResult:
+    """Парсит ответ ajax.php?action=search."""
+    ul = payload.get("ul") or []
+    if not ul:
+        return InnResolveResult(inn=inn, ogrn=None, error="Компания не найдена в Rusprofile")
+
+    # точное совпадение ИНН, иначе первая юрлицо
+    chosen = None
+    for item in ul:
+        raw_inn = re.sub(r"\D", "", str(item.get("inn") or ""))
+        if raw_inn == inn:
+            chosen = item
+            break
+    if chosen is None:
+        chosen = ul[0]
+
+    ogrn = str(chosen.get("ogrn") or chosen.get("raw_ogrn") or "").strip()
+    if not ogrn or not re.fullmatch(r"\d{13,15}", ogrn):
+        link = str(chosen.get("link") or chosen.get("url") or "")
+        m = OGRN_IN_URL_RE.search(link)
+        ogrn = m.group(1) if m else ""
+
+    if not ogrn:
+        return InnResolveResult(inn=inn, ogrn=None, error="В ответе ajax нет ОГРН")
+
+    name = chosen.get("name") or chosen.get("raw_name")
+    return InnResolveResult(
+        inn=inn,
+        ogrn=ogrn,
+        name=name,
+        final_url=rusprofile_url(ogrn),
+    )
 
 
 class RusprofileClient:
@@ -64,14 +83,15 @@ class RusprofileClient:
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
-        # короткий таймаут — лучше fail быстро, чем висеть 10 минут молча
         timeout = aiohttp.ClientTimeout(total=min(settings.http_timeout_sec, 20), connect=10)
         self._session = aiohttp.ClientSession(
             timeout=timeout,
             headers={
                 "User-Agent": settings.user_agent,
                 "Accept-Language": "ru-RU,ru;q=0.9",
-                "Accept": "text/html,application/xhtml+xml",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": "https://www.rusprofile.ru/",
             },
         )
 
@@ -80,13 +100,16 @@ class RusprofileClient:
             await self._session.close()
             self._session = None
 
-    async def _throttled_get(self, url: str) -> tuple[str, str]:
+    async def _throttled_get(self, url: str, accept_html: bool = False) -> tuple[str, str]:
         if not self._session:
             raise RuntimeError("RusprofileClient not started")
+        headers = {}
+        if accept_html:
+            headers["Accept"] = "text/html,application/xhtml+xml"
         async with self._lock:
             await asyncio.sleep(settings.request_delay_sec)
             logger.info("HTTP GET %s", url)
-            async with self._session.get(url, allow_redirects=True) as resp:
+            async with self._session.get(url, allow_redirects=True, headers=headers or None) as resp:
                 text = await resp.text()
                 final = str(resp.url)
                 logger.info("HTTP %s %s -> %s (%s bytes)", resp.status, url, final, len(text))
@@ -95,7 +118,7 @@ class RusprofileClient:
                 return final, text
 
     async def fetch(self, ogrn: str) -> str:
-        _, html = await self._throttled_get(rusprofile_url(ogrn))
+        _, html = await self._throttled_get(rusprofile_url(ogrn), accept_html=True)
         return html
 
     async def get_snapshot(self, ogrn: str) -> CompanySnapshot:
@@ -103,27 +126,22 @@ class RusprofileClient:
         return parse_company_html(html, ogrn)
 
     async def resolve_inn(self, inn: str) -> InnResolveResult:
-        """ИНН → ОГРН. Одна попытка, без долгих ретраев."""
+        """ИНН → ОГРН через рабочий ajax API Rusprofile (не /search — он 404)."""
         inn = normalize_inn(inn) or ""
         if not inn:
             return InnResolveResult(inn=inn, ogrn=None, error="Некорректный ИНН")
 
-        url = f"https://www.rusprofile.ru/search?query={inn}"
+        url = f"{AJAX_SEARCH}?query={inn}&action=search"
         try:
-            final_url, html = await self._throttled_get(url)
+            _, body = await self._throttled_get(url)
+            payload = json.loads(body)
         except Exception as exc:
-            logger.warning("resolve_inn failed for %s: %s", inn, exc)
+            logger.warning("resolve_inn ajax failed for %s: %s", inn, exc)
             return InnResolveResult(inn=inn, ogrn=None, error=str(exc))
 
-        ogrn = extract_ogrn_from_search_html(html, final_url)
-        if not ogrn:
-            return InnResolveResult(
-                inn=inn,
-                ogrn=None,
-                final_url=final_url,
-                error="ОГРН не найден в выдаче Rusprofile",
-            )
-
-        name = extract_name_near_ogrn(html, ogrn)
-        logger.info("resolve_inn %s -> %s (%s)", inn, ogrn, name)
-        return InnResolveResult(inn=inn, ogrn=ogrn, name=name, final_url=final_url)
+        result = parse_ajax_search(payload, inn)
+        if result.ogrn:
+            logger.info("resolve_inn %s -> %s (%s)", inn, result.ogrn, result.name)
+        else:
+            logger.warning("resolve_inn miss %s: %s", inn, result.error)
+        return result
