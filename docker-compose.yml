@@ -1,0 +1,11 @@
+services:
+  bot:
+    build: .
+    container_name: rusprofile-monitor
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:///./data/bot.db
