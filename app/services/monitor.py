@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import CheckResult, Company, IssueType, Ticket, TicketStatus
-from app.parser.rusprofile import CompanySnapshot
+from app.services.egrul import CompanySnapshot
 from app.services.rusprofile_client import RusprofileClient, rusprofile_url
 
 logger = logging.getLogger(__name__)
@@ -211,16 +211,15 @@ async def check_company(session: AsyncSession, client: RusprofileClient, company
         logger.exception("Check failed for %s", company.ogrn)
         company.last_error = str(exc)
         company.last_checked_at = datetime.now(timezone.utc)
-        # Rusprofile недоступен (403 и т.п.) — имя хотя бы из ЕГРЮЛ
+        # хотя бы имя/ИНН из поиска ЕГРЮЛ, если выписка не скачалась
         try:
-            query = company.inn or company.ogrn
-            resolved = await client.egrul.resolve_inn(query)
-            if resolved.ogrn == company.ogrn and resolved.name:
-                company.name = resolved.name
-                company.short_name = resolved.name
-            elif resolved.name and not company.short_name:
-                company.name = resolved.name
-                company.short_name = resolved.name
+            resolved = await client.egrul.search(company.inn or company.ogrn)
+            if resolved.ogrn == company.ogrn:
+                if resolved.name:
+                    company.name = resolved.name
+                    company.short_name = resolved.name
+                if resolved.inn and len(str(resolved.inn)) in (10, 12):
+                    company.inn = str(resolved.inn)
         except Exception:
             logger.exception("EGRUL name refresh failed for %s", company.ogrn)
         session.add(

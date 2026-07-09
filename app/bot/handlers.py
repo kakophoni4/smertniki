@@ -135,8 +135,9 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext) 
     await message.answer(
         f"Привет, {message.from_user.full_name or 'коллега'}!\n"
         f"Роль: <b>{role}</b>\n\n"
+        "Источник данных: <b>ЕГРЮЛ ФНС</b> (официальные выписки).\n"
         "Жми кнопки внизу.\n"
-        "📥 <b>Загрузить ИНН</b> — сразу резолвит и кладёт в мониторинг.",
+        "📥 <b>Загрузить ИНН</b> — резолв + мониторинг.",
         reply_markup=main_menu(user.role),
     )
 
@@ -306,8 +307,9 @@ async def menu_import_inn(message: Message, session: AsyncSession, state: FSMCon
     await state.clear()
     await message.answer(
         "📥 <b>Загрузка по ИНН</b>\n\n"
-        "Кидаешь ИНН → бот сам находит ОГРН через <b>ЕГРЮЛ ФНС</b> "
-        "и сразу кладёт в мониторинг.\n"
+        "Кидаешь ИНН → бот ищет в <b>ЕГРЮЛ ФНС</b>, "
+        "сразу кладёт в мониторинг.\n"
+        "Проверка недостоверок — по официальной выписке ЕГРЮЛ (PDF).\n"
         "Прогресс в чате и в логах сервера.",
         reply_markup=import_inn_menu(),
     )
@@ -321,7 +323,7 @@ async def ask_add_ogrn(message: Message, session: AsyncSession, state: FSMContex
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_ogrn_one)
-    await message.answer("Пришли <b>ОГРН</b> или ссылку rusprofile.ru/id/…", reply_markup=cancel_menu())
+    await message.answer("Пришли <b>ОГРН</b> (или ссылку с /id/ОГРН).", reply_markup=cancel_menu())
 
 
 @router.message(Form.wait_ogrn_one)
@@ -348,8 +350,9 @@ async def do_add_ogrn(message: Message, session: AsyncSession, state: FSMContext
     elif company.last_error:
         await message.answer(
             f"⚠️ {company_display(company)}\n"
-            f"Карточка Rusprofile не открылась: <code>{company.last_error}</code>\n"
-            f"Имя взято из ЕГРЮЛ. Недостоверки пока не проверены."
+            f"ОГРН <code>{company.ogrn}</code>\n"
+            f"Выписка ЕГРЮЛ не скачалась: <code>{company.last_error}</code>\n"
+            f"Имя из поиска ФНС. Недостоверки пока не проверены."
         )
     else:
         await message.answer(f"✅ {company_display(company)} — ок.")
