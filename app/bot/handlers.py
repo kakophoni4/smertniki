@@ -306,8 +306,9 @@ async def menu_import_inn(message: Message, session: AsyncSession, state: FSMCon
     await state.clear()
     await message.answer(
         "📥 <b>Загрузка по ИНН</b>\n\n"
-        "Кидаешь ИНН → бот сам находит ОГРН и <b>сразу кладёт в мониторинг</b>.\n"
-        "Прогресс будет в чате и в логах сервера.",
+        "Кидаешь ИНН → бот сам находит ОГРН через <b>ЕГРЮЛ ФНС</b> "
+        "и сразу кладёт в мониторинг.\n"
+        "Прогресс в чате и в логах сервера.",
         reply_markup=import_inn_menu(),
     )
 

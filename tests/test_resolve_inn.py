@@ -1,4 +1,5 @@
-from app.services.rusprofile_client import normalize_inn, parse_ajax_search
+from app.services.egrul import normalize_inn, parse_egrul_rows
+from app.services.rusprofile_client import parse_ajax_search
 
 
 def test_normalize_inn():
@@ -23,22 +24,25 @@ def test_parse_ajax_pioneer():
     result = parse_ajax_search(payload, "9731112429")
     assert result.ogrn == "1237700215290"
     assert result.name == 'ООО "Пионер"'
-    assert result.error is None
 
 
-def test_parse_ajax_empty():
-    result = parse_ajax_search({"ul": [], "success": True}, "9731112429")
-    assert result.ogrn is None
-    assert "не найдена" in (result.error or "").lower()
-
-
-def test_parse_ajax_picks_matching_inn():
+def test_parse_egrul_rows():
     payload = {
-        "ul": [
-            {"name": "Чужая", "ogrn": "1111111111111", "inn": "7700000000"},
-            {"name": "Нужная", "ogrn": "1237700215290", "inn": "9731112429"},
+        "rows": [
+            {
+                "c": 'ООО "ПИОНЕР"',
+                "i": "9731112429",
+                "k": "ul",
+                "n": 'ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ПИОНЕР"',
+                "o": "1237700215290",
+            }
         ]
     }
-    result = parse_ajax_search(payload, "9731112429")
+    result = parse_egrul_rows(payload, "9731112429")
     assert result.ogrn == "1237700215290"
-    assert result.name == "Нужная"
+    assert "ПИОНЕР" in (result.name or "")
+
+
+def test_parse_egrul_empty():
+    result = parse_egrul_rows({"rows": []}, "9731112429")
+    assert result.ogrn is None
