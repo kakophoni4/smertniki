@@ -48,6 +48,10 @@ def company_display(company: Company) -> str:
     return f"{name}, ИНН {inn}"
 
 
+def company_display_full(company: Company) -> str:
+    return f"{company_display(company)}\nОГРН {company.ogrn}"
+
+
 def snapshot_issues(snap: CompanySnapshot) -> dict[str, bool]:
     return {
         IssueType.ADDRESS: snap.unreliable_address,
@@ -129,43 +133,44 @@ async def _open_issue(session: AsyncSession, company: Company, issue_type: str) 
         issue_type=issue_type,
         status=TicketStatus.IN_PROGRESS,
         title=title,
-        details=f"ОГРН {company.ogrn}\n{rusprofile_url(company.ogrn)}",
+        details=f"ИНН {company.inn or '—'}\nОГРН {company.ogrn}\n{rusprofile_url(company.ogrn)}",
     )
     session.add(ticket)
     await session.flush()
 
     disp = company_display(company)
+    ids = f"ИНН {company.inn or '—'} / ОГРН {company.ogrn}"
     if issue_type == IssueType.ADDRESS:
         msg = (
             f"🚨 Недостоверность адреса\n\n"
-            f"{disp}\nОГРН: {company.ogrn}\n"
+            f"{disp}\n{ids}\n"
             f"Создан тикет #{ticket.id} — статус «В работе».\n"
             f"{rusprofile_url(company.ogrn)}"
         )
     elif issue_type == IssueType.FOUNDER:
         msg = (
             f"🚨 Недостоверность учредителя\n\n"
-            f"{disp}\nОГРН: {company.ogrn}\n"
+            f"{disp}\n{ids}\n"
             f"⚠️ Требуется согласование с бухгалтерией — возможно снятие объёма.\n"
             f"{rusprofile_url(company.ogrn)}"
         )
     elif issue_type == IssueType.DIRECTOR:
         msg = (
             f"🚨 Недостоверность должностного лица\n\n"
-            f"{disp}\nОГРН: {company.ogrn}\n"
+            f"{disp}\n{ids}\n"
             f"Создан тикет #{ticket.id} — статус «В работе».\n"
             f"{rusprofile_url(company.ogrn)}"
         )
     elif issue_type == IssueType.LIQUIDATION:
         msg = (
             f"🚨 Ликвидация / исключение\n\n"
-            f"{disp}\nОГРН: {company.ogrn}\n"
-            f"Статус: {company.status_text or 'см. Rusprofile'}\n"
+            f"{disp}\n{ids}\n"
+            f"Статус: {company.status_text or 'см. выписку ЕГРЮЛ'}\n"
             f"Создан тикет #{ticket.id}.\n"
             f"{rusprofile_url(company.ogrn)}"
         )
     else:
-        msg = f"🚨 {issue_label(issue_type)}\n\n{disp}\n{rusprofile_url(company.ogrn)}"
+        msg = f"🚨 {issue_label(issue_type)}\n\n{disp}\n{ids}\n{rusprofile_url(company.ogrn)}"
 
     return [msg]
 
