@@ -3,13 +3,12 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from app.db.models import UserRole
 
 
-# --- Reply menu labels (stable text matchers) ---
 BTN_STATUS = "📊 Сводка"
 BTN_TICKETS = "🎫 Тикеты"
 BTN_SHOPS = "🏪 Лавки"
 BTN_CHECK = "🔍 Проверка"
 BTN_USERS = "👥 Пользователи"
-BTN_RESOLVE = "🔄 ИНН → ОГРН"
+BTN_IMPORT_INN = "📥 Загрузить ИНН"
 BTN_BACK = "⬅️ Назад"
 BTN_CANCEL = "❌ Отмена"
 
@@ -26,9 +25,9 @@ BTN_ADD_USER = "➕ Выдать доступ"
 BTN_REMOVE_USER = "🚫 Забрать доступ"
 BTN_LIST_USERS = "📜 Список юзеров"
 
-BTN_RESOLVE_ONE = "1️⃣ Один ИНН"
-BTN_RESOLVE_LIST = "📋 Список ИНН"
-BTN_RESOLVE_FILE = "📎 Файл ИНН"
+BTN_INN_ONE = "1️⃣ Один ИНН"
+BTN_INN_LIST = "📋 Список ИНН"
+BTN_INN_FILE = "📎 Файл ИНН"
 
 
 def main_menu(role: str) -> ReplyKeyboardMarkup:
@@ -39,7 +38,7 @@ def main_menu(role: str) -> ReplyKeyboardMarkup:
         rows.extend(
             [
                 [KeyboardButton(text=BTN_SHOPS), KeyboardButton(text=BTN_CHECK)],
-                [KeyboardButton(text=BTN_RESOLVE), KeyboardButton(text=BTN_USERS)],
+                [KeyboardButton(text=BTN_IMPORT_INN), KeyboardButton(text=BTN_USERS)],
             ]
         )
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
@@ -78,11 +77,11 @@ def users_menu() -> ReplyKeyboardMarkup:
     )
 
 
-def resolve_menu() -> ReplyKeyboardMarkup:
+def import_inn_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_RESOLVE_ONE), KeyboardButton(text=BTN_RESOLVE_LIST)],
-            [KeyboardButton(text=BTN_RESOLVE_FILE)],
+            [KeyboardButton(text=BTN_INN_ONE), KeyboardButton(text=BTN_INN_LIST)],
+            [KeyboardButton(text=BTN_INN_FILE)],
             [KeyboardButton(text=BTN_BACK)],
         ],
         resize_keyboard=True,
@@ -108,29 +107,3 @@ def tickets_inline(tickets: list) -> InlineKeyboardMarkup:
             ]
         )
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def after_resolve_inline(ogrn: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="➕ Добавить в мониторинг",
-                    callback_data=f"add_ogrn:{ogrn}",
-                )
-            ]
-        ]
-    )
-
-
-def after_resolve_batch_inline(count: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"➕ Добавить все ({count}) в мониторинг",
-                    callback_data="add_resolved_batch",
-                )
-            ]
-        ]
-    )

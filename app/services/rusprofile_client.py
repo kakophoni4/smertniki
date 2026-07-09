@@ -4,7 +4,6 @@ import re
 from dataclasses import dataclass
 
 import aiohttp
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
 from app.parser.rusprofile import CompanySnapshot, parse_company_html
@@ -35,15 +34,12 @@ class InnResolveResult:
 
 
 def extract_ogrn_from_search_html(html: str, final_url: str = "") -> str | None:
-    """Достаёт ОГРН из редиректа на карточку или из выдачи поиска."""
     m = OGRN_IN_URL_RE.search(final_url or "")
     if m:
         return m.group(1)
 
-    # прямые ссылки на карточки в выдаче
     ids = OGRN_IN_URL_RE.findall(html)
     if ids:
-        # самый частый / первый — обычно нужная компания
         return ids[0]
 
     m = OGRN_IN_TEXT_RE.search(html)
@@ -53,7 +49,6 @@ def extract_ogrn_from_search_html(html: str, final_url: str = "") -> str | None:
 
 
 def extract_name_near_ogrn(html: str, ogrn: str) -> str | None:
-    # грубо: ищем h1 или title рядом
     m = re.search(r"<h1[^>]*>(.*?)</h1>", html, flags=re.IGNORECASE | re.DOTALL)
     if m:
         name = re.sub(r"<[^>]+>", "", m.group(1))
@@ -69,7 +64,8 @@ class RusprofileClient:
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
-        timeout = aiohttp.ClientTimeout(total=settings.http_timeout_sec)
+        # короткий таймаут — лучше fail быстро, чем висеть 10 минут молча
+        timeout = aiohttp.ClientTimeout(total=min(settings.http_timeout_sec, 20), connect=10)
         self._session = aiohttp.ClientSession(
             timeout=timeout,
             headers={
@@ -89,11 +85,15 @@ class RusprofileClient:
             raise RuntimeError("RusprofileClient not started")
         async with self._lock:
             await asyncio.sleep(settings.request_delay_sec)
+            logger.info("HTTP GET %s", url)
             async with self._session.get(url, allow_redirects=True) as resp:
-                resp.raise_for_status()
-                return str(resp.url), await resp.text()
+                text = await resp.text()
+                final = str(resp.url)
+                logger.info("HTTP %s %s -> %s (%s bytes)", resp.status, url, final, len(text))
+                if resp.status >= 400:
+                    raise RuntimeError(f"HTTP {resp.status} for {url}")
+                return final, text
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
     async def fetch(self, ogrn: str) -> str:
         _, html = await self._throttled_get(rusprofile_url(ogrn))
         return html
@@ -102,18 +102,17 @@ class RusprofileClient:
         html = await self.fetch(ogrn)
         return parse_company_html(html, ogrn)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True)
     async def resolve_inn(self, inn: str) -> InnResolveResult:
-        """Отдельный шаг: ИНН → ОГРН через поиск Rusprofile. В мониторинг не добавляет."""
+        """ИНН → ОГРН. Одна попытка, без долгих ретраев."""
         inn = normalize_inn(inn) or ""
         if not inn:
             return InnResolveResult(inn=inn, ogrn=None, error="Некорректный ИНН")
 
-        # основной поиск; если редирект на /id/ — сразу ОГРН
         url = f"https://www.rusprofile.ru/search?query={inn}"
         try:
             final_url, html = await self._throttled_get(url)
         except Exception as exc:
+            logger.warning("resolve_inn failed for %s: %s", inn, exc)
             return InnResolveResult(inn=inn, ogrn=None, error=str(exc))
 
         ogrn = extract_ogrn_from_search_html(html, final_url)
@@ -126,4 +125,5 @@ class RusprofileClient:
             )
 
         name = extract_name_near_ogrn(html, ogrn)
+        logger.info("resolve_inn %s -> %s (%s)", inn, ogrn, name)
         return InnResolveResult(inn=inn, ogrn=ogrn, name=name, final_url=final_url)

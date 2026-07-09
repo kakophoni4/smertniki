@@ -18,24 +18,22 @@ from app.bot.keyboards import (
     BTN_CHECK_ALL,
     BTN_CHECK_ONE,
     BTN_IMPORT_FILE,
+    BTN_IMPORT_INN,
+    BTN_INN_FILE,
+    BTN_INN_LIST,
+    BTN_INN_ONE,
     BTN_LIST_SHOPS,
     BTN_LIST_USERS,
     BTN_REMOVE,
     BTN_REMOVE_USER,
-    BTN_RESOLVE,
-    BTN_RESOLVE_FILE,
-    BTN_RESOLVE_LIST,
-    BTN_RESOLVE_ONE,
     BTN_SHOPS,
     BTN_STATUS,
     BTN_TICKETS,
     BTN_USERS,
-    after_resolve_batch_inline,
-    after_resolve_inline,
     cancel_menu,
     check_menu,
+    import_inn_menu,
     main_menu,
-    resolve_menu,
     shops_menu,
     tickets_inline,
     users_menu,
@@ -57,8 +55,7 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-# временный кэш резолва для кнопки «добавить все» (user_id -> list[ogrn])
-_resolved_cache: dict[int, list[str]] = {}
+PROGRESS_EVERY = 5  # писать прогресс в чат каждые N ИНН
 
 
 def is_config_admin(user_id: int) -> bool:
@@ -138,7 +135,8 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext) 
     await message.answer(
         f"Привет, {message.from_user.full_name or 'коллега'}!\n"
         f"Роль: <b>{role}</b>\n\n"
-        "Жми кнопки внизу — команды помнить не надо.",
+        "Жми кнопки внизу.\n"
+        "📥 <b>Загрузить ИНН</b> — сразу резолвит и кладёт в мониторинг.",
         reply_markup=main_menu(user.role),
     )
 
@@ -244,7 +242,6 @@ async def on_tickets(message: Message, session: AsyncSession) -> None:
 async def cb_heal(callback: CallbackQuery, session: AsyncSession) -> None:
     if not callback.from_user or not callback.message:
         return
-    # admin check
     user = await session.scalar(
         select(AllowedUser).where(AllowedUser.telegram_id == callback.from_user.id, AllowedUser.is_active.is_(True))
     )
@@ -302,19 +299,20 @@ async def menu_users(message: Message, session: AsyncSession, state: FSMContext)
     await message.answer("👥 Пользователи", reply_markup=users_menu())
 
 
-@router.message(F.text == BTN_RESOLVE)
-async def menu_resolve(message: Message, session: AsyncSession, state: FSMContext) -> None:
+@router.message(F.text == BTN_IMPORT_INN)
+async def menu_import_inn(message: Message, session: AsyncSession, state: FSMContext) -> None:
     if not await require_admin(message, session):
         return
     await state.clear()
     await message.answer(
-        "🔄 ИНН → ОГРН\nТолько резолв, в мониторинг само не добавит.\n"
-        "После резолва будет кнопка «Добавить».",
-        reply_markup=resolve_menu(),
+        "📥 <b>Загрузка по ИНН</b>\n\n"
+        "Кидаешь ИНН → бот сам находит ОГРН и <b>сразу кладёт в мониторинг</b>.\n"
+        "Прогресс будет в чате и в логах сервера.",
+        reply_markup=import_inn_menu(),
     )
 
 
-# ─── shops actions ───────────────────────────────────────────────────────────
+# ─── shops (OGRN) ────────────────────────────────────────────────────────────
 
 
 @router.message(F.text == BTN_ADD_OGRN)
@@ -322,10 +320,7 @@ async def ask_add_ogrn(message: Message, session: AsyncSession, state: FSMContex
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_ogrn_one)
-    await message.answer(
-        "Пришли <b>ОГРН</b> или ссылку rusprofile.ru/id/…",
-        reply_markup=cancel_menu(),
-    )
+    await message.answer("Пришли <b>ОГРН</b> или ссылку rusprofile.ru/id/…", reply_markup=cancel_menu())
 
 
 @router.message(Form.wait_ogrn_one)
@@ -337,9 +332,16 @@ async def do_add_ogrn(message: Message, session: AsyncSession, state: FSMContext
         await message.answer("Не распознал ОГРН. Ещё раз или «Отмена».")
         return
     await state.clear()
-    await _add_one_company(message, session, client, ogrn)
-    user = await ensure_user(session, message)
-    await message.answer("Готово.", reply_markup=shops_menu() if user and user.role == UserRole.ADMIN else None)
+    await _upsert_company(session, ogrn)
+    await session.commit()
+    company = await session.scalar(select(Company).where(Company.ogrn == ogrn))
+    await message.answer(f"Добавлено. Проверяю {ogrn}…")
+    msgs = await check_company(session, client, company)
+    if msgs:
+        await broadcast(session, message.bot, msgs)
+    else:
+        await message.answer(f"✅ {company_display(company)} — ок.")
+    await message.answer("Меню лавок", reply_markup=shops_menu())
 
 
 @router.message(F.text == BTN_ADD_LIST)
@@ -347,10 +349,7 @@ async def ask_add_list(message: Message, session: AsyncSession, state: FSMContex
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_ogrn_list)
-    await message.answer(
-        "Пришли список ОГРН — по одному на строку (или через пробел/запятую).",
-        reply_markup=cancel_menu(),
-    )
+    await message.answer("Пришли список ОГРН.", reply_markup=cancel_menu())
 
 
 @router.message(Form.wait_ogrn_list)
@@ -360,10 +359,10 @@ async def do_add_list(message: Message, session: AsyncSession, state: FSMContext
     raw = (message.text or "").replace(",", " ").replace(";", " ")
     ids = list(dict.fromkeys(x for x in (extract_ogrn_from_text(p) for p in raw.split()) if x))
     if not ids:
-        await message.answer("ОГРН не найдены. Ещё раз или «Отмена».")
+        await message.answer("ОГРН не найдены.")
         return
     await state.clear()
-    await _add_many_companies(message, session, client, ids)
+    await _add_many_and_check(message, session, client, ids)
     await message.answer("Меню лавок", reply_markup=shops_menu())
 
 
@@ -372,10 +371,7 @@ async def ask_import_file(message: Message, session: AsyncSession, state: FSMCon
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_ogrn_file)
-    await message.answer(
-        "Пришли файл <b>.txt / .csv</b> со списком ОГРН.",
-        reply_markup=cancel_menu(),
-    )
+    await message.answer("Пришли файл <b>.txt / .csv</b> с ОГРН.", reply_markup=cancel_menu())
 
 
 @router.message(Form.wait_ogrn_file, F.document)
@@ -394,7 +390,7 @@ async def do_import_ogrn_file(
         await message.answer("В файле нет ОГРН.")
         return
     await state.clear()
-    await _add_many_companies(message, session, client, ids)
+    await _add_many_and_check(message, session, client, ids)
     await message.answer("Меню лавок", reply_markup=shops_menu())
 
 
@@ -403,7 +399,7 @@ async def ask_remove(message: Message, session: AsyncSession, state: FSMContext)
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_remove_ogrn)
-    await message.answer("Пришли ОГРН лавки, которую убрать из мониторинга.", reply_markup=cancel_menu())
+    await message.answer("Пришли ОГРН для удаления.", reply_markup=cancel_menu())
 
 
 @router.message(Form.wait_remove_ogrn)
@@ -422,7 +418,7 @@ async def do_remove(message: Message, session: AsyncSession, state: FSMContext) 
     company.is_active = False
     await session.commit()
     await state.clear()
-    await broadcast(session, message.bot, [f"🗑 Лавка удалена из мониторинга:\n{disp}\nОГРН {ogrn}"])
+    await broadcast(session, message.bot, [f"🗑 Лавка удалена:\n{disp}\nОГРН {ogrn}"])
     await message.answer("Удалено.", reply_markup=shops_menu())
 
 
@@ -474,7 +470,7 @@ async def ask_check_one(message: Message, session: AsyncSession, state: FSMConte
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_check_ogrn)
-    await message.answer("Пришли ОГРН для проверки.", reply_markup=cancel_menu())
+    await message.answer("Пришли ОГРН.", reply_markup=cancel_menu())
 
 
 @router.message(Form.wait_check_ogrn)
@@ -502,19 +498,19 @@ async def do_check_one(message: Message, session: AsyncSession, state: FSMContex
     )
 
 
-# ─── resolve INN ─────────────────────────────────────────────────────────────
+# ─── import INN → resolve → add immediately ──────────────────────────────────
 
 
-@router.message(F.text == BTN_RESOLVE_ONE)
-async def ask_resolve_one(message: Message, session: AsyncSession, state: FSMContext) -> None:
+@router.message(F.text == BTN_INN_ONE)
+async def ask_inn_one(message: Message, session: AsyncSession, state: FSMContext) -> None:
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_inn_one)
-    await message.answer("Пришли <b>ИНН</b> (10 или 12 цифр).", reply_markup=cancel_menu())
+    await message.answer("Пришли <b>ИНН</b>. Сразу добавлю в мониторинг.", reply_markup=cancel_menu())
 
 
 @router.message(Form.wait_inn_one)
-async def do_resolve_one(
+async def do_inn_one(
     message: Message, session: AsyncSession, state: FSMContext, client: RusprofileClient
 ) -> None:
     if not await require_admin(message, session):
@@ -523,31 +519,24 @@ async def do_resolve_one(
     if not inn:
         await message.answer("Некорректный ИНН.")
         return
-    await message.answer(f"Ищу ОГРН для {inn}…")
-    result = await client.resolve_inn(inn)
     await state.clear()
-    if not result.ogrn:
-        await message.answer(f"❌ {inn}: {result.error}", reply_markup=resolve_menu())
-        return
-    await message.answer(
-        f"✅ ИНН {inn}\nОГРН: <code>{result.ogrn}</code>\n{result.name or '—'}\n"
-        f"https://www.rusprofile.ru/id/{result.ogrn}",
-        reply_markup=after_resolve_inline(result.ogrn),
-        disable_web_page_preview=True,
-    )
-    await message.answer("Меню резолва", reply_markup=resolve_menu())
+    await _import_inns_and_add(message, session, client, [inn])
+    await message.answer("Меню загрузки", reply_markup=import_inn_menu())
 
 
-@router.message(F.text == BTN_RESOLVE_LIST)
-async def ask_resolve_list(message: Message, session: AsyncSession, state: FSMContext) -> None:
+@router.message(F.text == BTN_INN_LIST)
+async def ask_inn_list(message: Message, session: AsyncSession, state: FSMContext) -> None:
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_inn_list)
-    await message.answer("Пришли список ИНН (по строке / через пробел).", reply_markup=cancel_menu())
+    await message.answer(
+        "Пришли список ИНН.\nСразу резолвлю и кладу в мониторинг. Прогресс каждые 5 шт.",
+        reply_markup=cancel_menu(),
+    )
 
 
 @router.message(Form.wait_inn_list)
-async def do_resolve_list(
+async def do_inn_list(
     message: Message, session: AsyncSession, state: FSMContext, client: RusprofileClient
 ) -> None:
     if not await require_admin(message, session):
@@ -559,19 +548,23 @@ async def do_resolve_list(
         await message.answer("ИНН не найдены.")
         return
     await state.clear()
-    await _resolve_many(message, client, inns)
+    await _import_inns_and_add(message, session, client, inns)
+    await message.answer("Меню загрузки", reply_markup=import_inn_menu())
 
 
-@router.message(F.text == BTN_RESOLVE_FILE)
-async def ask_resolve_file(message: Message, session: AsyncSession, state: FSMContext) -> None:
+@router.message(F.text == BTN_INN_FILE)
+async def ask_inn_file(message: Message, session: AsyncSession, state: FSMContext) -> None:
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_inn_file)
-    await message.answer("Пришли файл <b>.txt / .csv</b> со списком ИНН.", reply_markup=cancel_menu())
+    await message.answer(
+        "Пришли файл <b>.txt / .csv</b> с ИНН.\nСразу в мониторинг + прогресс в чат/логи.",
+        reply_markup=cancel_menu(),
+    )
 
 
 @router.message(Form.wait_inn_file, F.document)
-async def do_resolve_file(
+async def do_inn_file(
     message: Message, session: AsyncSession, state: FSMContext, client: RusprofileClient
 ) -> None:
     if not await require_admin(message, session):
@@ -586,62 +579,8 @@ async def do_resolve_file(
         await message.answer("В файле нет ИНН.")
         return
     await state.clear()
-    await _resolve_many(message, client, inns)
-
-
-@router.callback_query(F.data.startswith("add_ogrn:"))
-async def cb_add_ogrn(callback: CallbackQuery, session: AsyncSession, client: RusprofileClient) -> None:
-    if not callback.from_user or not callback.message:
-        return
-    user = await session.scalar(
-        select(AllowedUser).where(AllowedUser.telegram_id == callback.from_user.id, AllowedUser.is_active.is_(True))
-    )
-    if not user or (user.role != UserRole.ADMIN and not is_config_admin(user.telegram_id)):
-        await callback.answer("Только админ", show_alert=True)
-        return
-    ogrn = callback.data.split(":", 1)[1]
-    existing = await session.scalar(select(Company).where(Company.ogrn == ogrn))
-    if existing and existing.is_active:
-        await callback.answer("Уже в базе")
-        return
-    if existing:
-        existing.is_active = True
-        await session.commit()
-        await callback.answer("Снова активна")
-        await callback.message.answer(f"Лавка {ogrn} снова в мониторинге.")
-        return
-    company = Company(ogrn=ogrn, rusprofile_url=rusprofile_url(ogrn))
-    session.add(company)
-    await session.commit()
-    await callback.answer("Добавляю…")
-    await callback.message.answer(f"Добавлено. Проверяю {ogrn}…")
-    msgs = await check_company(session, client, company)
-    if msgs:
-        await broadcast(session, callback.bot, msgs)
-    else:
-        await callback.message.answer(f"✅ {company_display(company)} — ок.")
-
-
-@router.callback_query(F.data == "add_resolved_batch")
-async def cb_add_resolved_batch(
-    callback: CallbackQuery, session: AsyncSession, client: RusprofileClient
-) -> None:
-    if not callback.from_user or not callback.message:
-        return
-    user = await session.scalar(
-        select(AllowedUser).where(AllowedUser.telegram_id == callback.from_user.id, AllowedUser.is_active.is_(True))
-    )
-    if not user or (user.role != UserRole.ADMIN and not is_config_admin(user.telegram_id)):
-        await callback.answer("Только админ", show_alert=True)
-        return
-    ids = _resolved_cache.get(callback.from_user.id) or []
-    if not ids:
-        await callback.answer("Кэш пуст — сделай резолв ещё раз", show_alert=True)
-        return
-    await callback.answer("Добавляю…")
-    # emulate message for helper
-    await _add_many_companies(callback.message, session, client, ids)
-    _resolved_cache.pop(callback.from_user.id, None)
+    await _import_inns_and_add(message, session, client, inns)
+    await message.answer("Меню загрузки", reply_markup=import_inn_menu())
 
 
 # ─── users ───────────────────────────────────────────────────────────────────
@@ -652,11 +591,7 @@ async def ask_add_user(message: Message, session: AsyncSession, state: FSMContex
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_add_user)
-    await message.answer(
-        "Пришли Telegram ID пользователя.\n"
-        "Он увидит свой ID, если напишет боту /start без доступа.",
-        reply_markup=cancel_menu(),
-    )
+    await message.answer("Пришли Telegram ID.", reply_markup=cancel_menu())
 
 
 @router.message(Form.wait_add_user)
@@ -684,7 +619,7 @@ async def ask_remove_user(message: Message, session: AsyncSession, state: FSMCon
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_remove_user)
-    await message.answer("Пришли Telegram ID, у кого забрать доступ.", reply_markup=cancel_menu())
+    await message.answer("Пришли Telegram ID.", reply_markup=cancel_menu())
 
 
 @router.message(Form.wait_remove_user)
@@ -734,44 +669,100 @@ async def _read_document_text(message: Message) -> str | None:
     return buf.read().decode("utf-8", errors="replace")
 
 
-async def _add_one_company(
-    message: Message, session: AsyncSession, client: RusprofileClient, ogrn: str
-) -> None:
+async def _upsert_company(session: AsyncSession, ogrn: str, inn: str | None = None) -> tuple[Company, bool]:
+    """Возвращает (company, is_new)."""
     existing = await session.scalar(select(Company).where(Company.ogrn == ogrn))
     if existing:
-        if not existing.is_active:
-            existing.is_active = True
-            await session.commit()
-            await message.answer(f"Лавка {ogrn} снова активна.")
-        else:
-            await message.answer(f"Уже в базе: {company_display(existing)}")
-        return
-    company = Company(ogrn=ogrn, rusprofile_url=rusprofile_url(ogrn))
+        existing.is_active = True
+        if inn and not existing.inn:
+            existing.inn = inn
+        return existing, False
+    company = Company(ogrn=ogrn, inn=inn, rusprofile_url=rusprofile_url(ogrn))
     session.add(company)
-    await session.commit()
-    await message.answer(f"Добавлено. Проверяю {ogrn}…")
-    msgs = await check_company(session, client, company)
-    if msgs:
-        await broadcast(session, message.bot, msgs)
-    else:
-        await message.answer(f"✅ {company_display(company)} — проблем не найдено.")
+    return company, True
 
 
-async def _add_many_companies(
+async def _import_inns_and_add(
+    message: Message, session: AsyncSession, client: RusprofileClient, inns: list[str]
+) -> None:
+    """ИНН → ОГРН → сразу в БД. Прогресс в чат и логи. Проверку недостоверок — отдельно."""
+    total = len(inns)
+    eta = max(1, int(total * settings.request_delay_sec / 60))
+    await message.answer(
+        f"🚀 Старт: {total} ИНН\n"
+        f"Резолв + добавление в мониторинг.\n"
+        f"Ожидай ~{eta} мин. Прогресс каждые {PROGRESS_EVERY} шт.\n"
+        f"Логи: <code>docker compose logs -f</code>"
+    )
+    logger.info("INN import started: %s items", total)
+
+    ok = 0
+    fail = 0
+    added = 0
+    errors: list[str] = []
+    new_ogrns: list[str] = []
+
+    for i, inn in enumerate(inns, 1):
+        logger.info("INN import %s/%s: %s", i, total, inn)
+        result = await client.resolve_inn(inn)
+        if not result.ogrn:
+            fail += 1
+            err = result.error or "unknown"
+            errors.append(f"❌ {inn} — {err}")
+            logger.warning("INN import fail %s: %s", inn, err)
+        else:
+            company, is_new = await _upsert_company(session, result.ogrn, inn=inn)
+            if is_new:
+                added += 1
+                new_ogrns.append(result.ogrn)
+            ok += 1
+            await session.commit()
+            logger.info("INN import ok %s -> %s (new=%s)", inn, result.ogrn, is_new)
+
+        if i % PROGRESS_EVERY == 0 or i == total:
+            await message.answer(
+                f"⏳ {i}/{total} | ок {ok} | ошибок {fail} | новых в базе {added}"
+            )
+
+    summary = [
+        f"🏁 Готово: {total}",
+        f"✅ резолв: {ok}",
+        f"❌ ошибок: {fail}",
+        f"🆕 новых лавок: {added}",
+    ]
+    await message.answer("\n".join(summary))
+    logger.info("INN import done: ok=%s fail=%s added=%s", ok, fail, added)
+
+    if errors:
+        await send_chunks(message, ["Ошибки:"] + errors[:50] + (["…"] if len(errors) > 50 else []))
+
+    if added:
+        await message.answer(
+            f"Запускаю проверку недостоверок по {added} новым…\n"
+            f"(остальные уже были в базе — их можно прогнать кнопкой «Проверить все»)"
+        )
+        # проверяем только новые, чтобы не долбить все 170 сразу лишний раз
+        for ogrn in new_ogrns:
+            company = await session.scalar(select(Company).where(Company.ogrn == ogrn))
+            if not company:
+                continue
+            msgs = await check_company(session, client, company)
+            if msgs:
+                await broadcast(session, message.bot, msgs)
+        await message.answer("Проверка новых завершена.")
+
+
+async def _add_many_and_check(
     message: Message, session: AsyncSession, client: RusprofileClient, ids: list[str]
 ) -> None:
     added = 0
     for ogrn in ids:
-        existing = await session.scalar(select(Company).where(Company.ogrn == ogrn))
-        if existing:
-            existing.is_active = True
-            continue
-        session.add(Company(ogrn=ogrn, rusprofile_url=rusprofile_url(ogrn)))
-        added += 1
+        _, is_new = await _upsert_company(session, ogrn)
+        if is_new:
+            added += 1
     await session.commit()
     await message.answer(
-        f"📥 Найдено {len(ids)} ОГРН, новых {added}.\n"
-        f"Проверка ~{max(1, int(len(ids) * settings.request_delay_sec / 60))} мин…"
+        f"📥 {len(ids)} ОГРН, новых {added}. Проверка ~{max(1, int(len(ids) * settings.request_delay_sec / 60))} мин…"
     )
     msgs = await check_all_companies(session, client)
     if msgs:
@@ -779,29 +770,6 @@ async def _add_many_companies(
         await message.answer(f"Готово. Алертов: {len(msgs)}")
     else:
         await message.answer("Готово. Новых проблем нет.")
-
-
-async def _resolve_many(message: Message, client: RusprofileClient, inns: list[str]) -> None:
-    await message.answer(
-        f"Резолвлю {len(inns)} ИНН… (~{max(1, int(len(inns) * settings.request_delay_sec / 60))} мин)"
-    )
-    lines: list[str] = []
-    ogrns: list[str] = []
-    for inn in inns:
-        result = await client.resolve_inn(inn)
-        if result.ogrn:
-            lines.append(f"✅ {inn} → {result.ogrn}")
-            ogrns.append(result.ogrn)
-        else:
-            lines.append(f"❌ {inn} — {result.error}")
-    await send_chunks(message, lines)
-    if ogrns and message.from_user:
-        _resolved_cache[message.from_user.id] = ogrns
-        await message.answer(
-            f"Готово: {len(ogrns)} ОГРН из {len(inns)}.\nМожно сразу добавить в мониторинг:",
-            reply_markup=after_resolve_batch_inline(len(ogrns)),
-        )
-    await message.answer("Меню резолва", reply_markup=resolve_menu())
 
 
 async def broadcast(session: AsyncSession, bot: Bot, messages: list[str]) -> None:
