@@ -6,6 +6,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.bot.handlers import setup_dispatcher
 from app.bot.middleware import DbMiddleware, RusprofileMiddleware
@@ -27,7 +28,7 @@ async def main() -> None:
     await init_db()
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
     client = RusprofileClient()
     await client.start()
 
