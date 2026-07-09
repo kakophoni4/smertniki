@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     Path("data").mkdir(exist_ok=True)
+    Path(settings.vypiski_dir).mkdir(parents=True, exist_ok=True)
     await init_db()
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))

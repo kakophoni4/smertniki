@@ -2,9 +2,10 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db.models import CheckResult, Company, IssueType, Ticket, TicketStatus
 from app.services.egrul import CompanySnapshot
 from app.services.rusprofile_client import RusprofileClient, rusprofile_url
@@ -61,6 +62,23 @@ def snapshot_issues(snap: CompanySnapshot) -> dict[str, bool]:
     }
 
 
+async def _prune_check_results(session: AsyncSession, company_id: int) -> None:
+    """Оставляем только последние N проверок на лавку — не раздуваем БД."""
+    keep = max(1, settings.keep_check_results)
+    ids = (
+        await session.scalars(
+            select(CheckResult.id)
+            .where(CheckResult.company_id == company_id)
+            .order_by(CheckResult.id.desc())
+        )
+    ).all()
+    if len(ids) <= keep:
+        return
+    stale = list(ids[keep:])
+    await session.execute(delete(CheckResult).where(CheckResult.id.in_(stale)))
+    logger.info("Pruned %s old check_results for company_id=%s", len(stale), company_id)
+
+
 async def apply_snapshot(session: AsyncSession, company: Company, snap: CompanySnapshot) -> list[str]:
     """Обновляет компанию, пишет check_result, открывает/закрывает тикеты. Возвращает тексты уведомлений."""
     now = datetime.now(timezone.utc)
@@ -102,6 +120,7 @@ async def apply_snapshot(session: AsyncSession, company: Company, snap: CompanyS
             raw_summary=snap.raw_summary,
         )
     )
+    await _prune_check_results(session, company.id)
 
     notifications: list[str] = []
 
@@ -234,6 +253,7 @@ async def check_company(session: AsyncSession, client: RusprofileClient, company
                 error=str(exc),
             )
         )
+        await _prune_check_results(session, company.id)
         await session.commit()
         return []
 

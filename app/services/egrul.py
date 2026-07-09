@@ -16,6 +16,7 @@ import io
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import aiohttp
 from pypdf import PdfReader
@@ -384,6 +385,21 @@ class EgrulClient:
                     raise RuntimeError(f"Ожидали PDF, получили {ctype} ({len(data)} bytes)")
                 return data
 
+    def _vypiska_path(self, ogrn: str) -> Path:
+        root = Path(settings.vypiski_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        return root / f"{ogrn}.pdf"
+
+    def save_vypiska_replace(self, ogrn: str, pdf: bytes) -> Path:
+        """Одна выписка на ОГРН: старый файл перезаписывается."""
+        path = self._vypiska_path(ogrn)
+        # атомарная замена: пишем во временный, потом replace
+        tmp = path.with_suffix(".pdf.tmp")
+        tmp.write_bytes(pdf)
+        tmp.replace(path)
+        logger.info("EGRUL vypiska saved %s (%s bytes, replaced old)", path, len(pdf))
+        return path
+
     async def get_snapshot(self, ogrn: str) -> CompanySnapshot:
         """Полная проверка компании через выписку ЕГРЮЛ."""
         ogrn_n = normalize_ogrn(ogrn) or ogrn
@@ -396,8 +412,16 @@ class EgrulClient:
             raise RuntimeError("Нет token выписки в ответе ЕГРЮЛ")
 
         pdf = await self.download_vypiska_pdf(search.row_token)
-        text = extract_text_from_pdf(pdf)
+        try:
+            self.save_vypiska_replace(ogrn_n, pdf)
+            text = extract_text_from_pdf(pdf)
+        finally:
+            # не держим PDF в RAM после разбора
+            del pdf
+
         snap = parse_vypiska_text(text, ogrn_n)
+        del text
+
         # подстрахуем имя/инн из search, если PDF криво распарсился
         if not snap.short_name and search.name:
             snap.short_name = search.name

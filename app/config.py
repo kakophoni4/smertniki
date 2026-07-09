@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./data/bot.db"
     timezone: str = "Europe/Moscow"
     user_agent: str = "Mozilla/5.0 (compatible; LavkiMonitor/1.0)"
+    # одна актуальная выписка на компанию: data/vypiski/{ogrn}.pdf (перезапись)
+    vypiski_dir: str = "./data/vypiski"
+    # сколько последних check_results хранить на лавку (остальное удаляем)
+    keep_check_results: int = 5
 
     @property
     def admin_id_list(self) -> list[int]:
