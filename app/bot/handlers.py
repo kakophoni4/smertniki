@@ -21,8 +21,10 @@ from app.bot.keyboards import (
     BTN_IMPORT_FILE,
     BTN_LIST_SHOPS,
     BTN_LIST_USERS,
+    BTN_MAKE_ADMIN,
     BTN_REMOVE,
     BTN_REMOVE_USER,
+    BTN_REVOKE_ADMIN,
     BTN_SHOPS,
     BTN_STATUS,
     BTN_TICKETS,
@@ -32,6 +34,7 @@ from app.bot.keyboards import (
     main_menu,
     shops_menu,
     tickets_inline,
+    user_role_inline,
     users_menu,
 )
 from app.bot.states import Form
@@ -535,32 +538,82 @@ async def do_check_one(message: Message, session: AsyncSession, state: FSMContex
 # ─── users ───────────────────────────────────────────────────────────────────
 
 
+def _parse_tg_id(text: str | None) -> int | None:
+    raw = (text or "").strip()
+    return int(raw) if raw.isdigit() else None
+
+
+async def _set_user_role(
+    session: AsyncSession,
+    tg_id: int,
+    role: str,
+    *,
+    actor_id: int,
+) -> str:
+    if role == UserRole.USER and tg_id == actor_id:
+        return "Нельзя снять админа с самого себя."
+
+    u = await session.scalar(select(AllowedUser).where(AllowedUser.telegram_id == tg_id))
+    if role == UserRole.ADMIN:
+        if u:
+            u.is_active = True
+            u.notify = True
+            u.role = UserRole.ADMIN
+        else:
+            session.add(
+                AllowedUser(
+                    telegram_id=tg_id,
+                    role=UserRole.ADMIN,
+                    is_active=True,
+                    notify=True,
+                )
+            )
+        await session.commit()
+        return f"👑 {tg_id} теперь админ. Пусть нажмёт /start."
+
+    if not u:
+        return "Пользователь не найден."
+    u.role = UserRole.USER
+    await session.commit()
+    note = ""
+    if is_config_admin(tg_id):
+        note = (
+            "\n⚠️ Он ещё в ADMIN_IDS (.env) — пока ID там, /start снова сделает его админом. "
+            "Убери из .env и перезапусти контейнер."
+        )
+    return f"👤 {tg_id} больше не админ (обычный доступ сохранён).{note}"
+
+
 @router.message(F.text == BTN_ADD_USER)
 async def ask_add_user(message: Message, session: AsyncSession, state: FSMContext) -> None:
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_add_user)
-    await message.answer("Пришли Telegram ID.", reply_markup=cancel_menu())
+    await message.answer(
+        "Пришли Telegram ID.\nБудет обычный доступ (уведомления/сводка/тикеты).",
+        reply_markup=cancel_menu(),
+    )
 
 
 @router.message(Form.wait_add_user)
 async def do_add_user(message: Message, session: AsyncSession, state: FSMContext) -> None:
     if not await require_admin(message, session):
         return
-    text = (message.text or "").strip()
-    if not text.isdigit():
+    tg_id = _parse_tg_id(message.text)
+    if tg_id is None:
         await message.answer("Нужен числовой Telegram ID.")
         return
-    tg_id = int(text)
     u = await session.scalar(select(AllowedUser).where(AllowedUser.telegram_id == tg_id))
     if u:
         u.is_active = True
         u.notify = True
+        if u.role != UserRole.ADMIN:
+            u.role = UserRole.USER
     else:
         session.add(AllowedUser(telegram_id=tg_id, role=UserRole.USER, is_active=True, notify=True))
     await session.commit()
     await state.clear()
-    await message.answer(f"✅ Доступ выдан: {tg_id}", reply_markup=users_menu())
+    await message.answer(f"✅ Доступ выдан: {tg_id} (user)", reply_markup=users_menu())
 
 
 @router.message(F.text == BTN_REMOVE_USER)
@@ -568,18 +621,21 @@ async def ask_remove_user(message: Message, session: AsyncSession, state: FSMCon
     if not await require_admin(message, session):
         return
     await state.set_state(Form.wait_remove_user)
-    await message.answer("Пришли Telegram ID.", reply_markup=cancel_menu())
+    await message.answer("Пришли Telegram ID — заберём доступ полностью.", reply_markup=cancel_menu())
 
 
 @router.message(Form.wait_remove_user)
 async def do_remove_user(message: Message, session: AsyncSession, state: FSMContext) -> None:
-    if not await require_admin(message, session):
+    actor = await require_admin(message, session)
+    if not actor:
         return
-    text = (message.text or "").strip()
-    if not text.isdigit():
+    tg_id = _parse_tg_id(message.text)
+    if tg_id is None:
         await message.answer("Нужен числовой Telegram ID.")
         return
-    tg_id = int(text)
+    if tg_id == message.from_user.id:
+        await message.answer("Нельзя забрать доступ у самого себя.")
+        return
     u = await session.scalar(select(AllowedUser).where(AllowedUser.telegram_id == tg_id))
     if not u:
         await message.answer("Не найден.")
@@ -590,6 +646,60 @@ async def do_remove_user(message: Message, session: AsyncSession, state: FSMCont
     await message.answer(f"Доступ отозван: {tg_id}", reply_markup=users_menu())
 
 
+@router.message(F.text == BTN_MAKE_ADMIN)
+async def ask_make_admin(message: Message, session: AsyncSession, state: FSMContext) -> None:
+    if not await require_admin(message, session):
+        return
+    await state.set_state(Form.wait_make_admin)
+    await message.answer(
+        "Пришли Telegram ID — сделаю <b>админом</b>.\n"
+        "Человек должен один раз написать боту /start (хотя бы без доступа), чтобы узнать ID.",
+        reply_markup=cancel_menu(),
+    )
+
+
+@router.message(Form.wait_make_admin)
+async def do_make_admin(message: Message, session: AsyncSession, state: FSMContext) -> None:
+    actor = await require_admin(message, session)
+    if not actor:
+        return
+    tg_id = _parse_tg_id(message.text)
+    if tg_id is None:
+        await message.answer("Нужен числовой Telegram ID.")
+        return
+    msg = await _set_user_role(session, tg_id, UserRole.ADMIN, actor_id=message.from_user.id)
+    await state.clear()
+    await message.answer(msg, reply_markup=users_menu())
+
+
+@router.message(F.text == BTN_REVOKE_ADMIN)
+async def ask_revoke_admin(message: Message, session: AsyncSession, state: FSMContext) -> None:
+    if not await require_admin(message, session):
+        return
+    await state.set_state(Form.wait_revoke_admin)
+    await message.answer(
+        "Пришли Telegram ID админа — сниму роль (останется обычный доступ).",
+        reply_markup=cancel_menu(),
+    )
+
+
+@router.message(Form.wait_revoke_admin)
+async def do_revoke_admin(message: Message, session: AsyncSession, state: FSMContext) -> None:
+    actor = await require_admin(message, session)
+    if not actor:
+        return
+    tg_id = _parse_tg_id(message.text)
+    if tg_id is None:
+        await message.answer("Нужен числовой Telegram ID.")
+        return
+    if tg_id == message.from_user.id:
+        await message.answer("Нельзя снять админа с самого себя.")
+        return
+    msg = await _set_user_role(session, tg_id, UserRole.USER, actor_id=message.from_user.id)
+    await state.clear()
+    await message.answer(msg, reply_markup=users_menu())
+
+
 @router.message(F.text == BTN_LIST_USERS)
 async def on_list_users(message: Message, session: AsyncSession) -> None:
     if not await require_admin(message, session):
@@ -598,8 +708,46 @@ async def on_list_users(message: Message, session: AsyncSession) -> None:
     lines = ["👥 Пользователи:\n"]
     for u in users:
         status = "✅" if u.is_active else "❌"
-        lines.append(f"{status} {u.telegram_id} @{u.username or '—'} ({u.role})")
+        crown = "👑 " if u.role == UserRole.ADMIN else ""
+        env = " [.env]" if is_config_admin(u.telegram_id) else ""
+        lines.append(f"{status} {crown}{u.telegram_id} @{u.username or '—'} ({u.role}){env}")
     await message.answer("\n".join(lines), reply_markup=users_menu())
+    active = [u for u in users if u.is_active]
+    if active:
+        await message.answer("Смена роли одной кнопкой:", reply_markup=user_role_inline(active))
+
+
+@router.callback_query(F.data.startswith("role:"))
+async def cb_change_role(callback: CallbackQuery, session: AsyncSession) -> None:
+    if not callback.from_user or not callback.message:
+        return
+    actor = await session.scalar(
+        select(AllowedUser).where(
+            AllowedUser.telegram_id == callback.from_user.id,
+            AllowedUser.is_active.is_(True),
+        )
+    )
+    if not actor or (actor.role != UserRole.ADMIN and not is_config_admin(actor.telegram_id)):
+        await callback.answer("Только админ", show_alert=True)
+        return
+
+    # role:admin:123 / role:user:123
+    parts = callback.data.split(":")
+    if len(parts) != 3 or not parts[2].isdigit():
+        await callback.answer("Битые данные", show_alert=True)
+        return
+    role = parts[1]
+    tg_id = int(parts[2])
+    if role not in (UserRole.ADMIN, UserRole.USER):
+        await callback.answer("Неизвестная роль", show_alert=True)
+        return
+    if role == UserRole.USER and tg_id == callback.from_user.id:
+        await callback.answer("Нельзя снять админа с себя", show_alert=True)
+        return
+
+    msg = await _set_user_role(session, tg_id, role, actor_id=callback.from_user.id)
+    await callback.answer("Готово")
+    await callback.message.answer(msg)
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────

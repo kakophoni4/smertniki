@@ -9,3 +9,5 @@ class Form(StatesGroup):
     wait_check_inn = State()
     wait_add_user = State()
     wait_remove_user = State()
+    wait_make_admin = State()
+    wait_revoke_admin = State()
