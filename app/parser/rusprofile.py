@@ -93,7 +93,7 @@ def _extract_name(soup: BeautifulSoup) -> tuple[str | None, str | None]:
             if m:
                 short = _norm(m.group(1))
 
-    return full or short, short or full
+    return short or full, short or full
 
 
 def _extract_inn(soup: BeautifulSoup, page_text: str) -> str | None:

@@ -43,6 +43,23 @@ def test_parse_egrul_rows():
     assert "ПИОНЕР" in (result.name or "")
 
 
+def test_parse_egrul_by_ogrn():
+    payload = {
+        "rows": [
+            {
+                "c": 'ООО "ПРОРВА"',
+                "i": "9726027672",
+                "k": "ul",
+                "o": "1227700761001",
+            }
+        ]
+    }
+    result = parse_egrul_rows(payload, "1227700761001")
+    assert result.ogrn == "1227700761001"
+    assert result.inn == "9726027672"
+    assert "ПРОРВА" in (result.name or "")
+
+
 def test_parse_egrul_empty():
     result = parse_egrul_rows({"rows": []}, "9731112429")
     assert result.ogrn is None

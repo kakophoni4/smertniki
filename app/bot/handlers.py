@@ -333,13 +333,24 @@ async def do_add_ogrn(message: Message, session: AsyncSession, state: FSMContext
         await message.answer("Не распознал ОГРН. Ещё раз или «Отмена».")
         return
     await state.clear()
-    await _upsert_company(session, ogrn)
+
+    # имя сразу с ЕГРЮЛ — не ждём Rusprofile и не показываем мусор из БД
+    resolved = await client.egrul.resolve_inn(ogrn)
+    name = resolved.name if resolved.ogrn == ogrn else None
+    inn = resolved.inn if resolved.ogrn == ogrn else None
+    await _upsert_company(session, ogrn, inn=inn, name=name)
     await session.commit()
     company = await session.scalar(select(Company).where(Company.ogrn == ogrn))
-    await message.answer(f"Добавлено. Проверяю {ogrn}…")
+    await message.answer(f"Добавлено: {company_display(company)}\nПроверяю карточку…")
     msgs = await check_company(session, client, company)
     if msgs:
         await broadcast(session, message.bot, msgs)
+    elif company.last_error:
+        await message.answer(
+            f"⚠️ {company_display(company)}\n"
+            f"Карточка Rusprofile не открылась: <code>{company.last_error}</code>\n"
+            f"Имя взято из ЕГРЮЛ. Недостоверки пока не проверены."
+        )
     else:
         await message.answer(f"✅ {company_display(company)} — ок.")
     await message.answer("Меню лавок", reply_markup=shops_menu())
@@ -670,15 +681,29 @@ async def _read_document_text(message: Message) -> str | None:
     return buf.read().decode("utf-8", errors="replace")
 
 
-async def _upsert_company(session: AsyncSession, ogrn: str, inn: str | None = None) -> tuple[Company, bool]:
-    """Возвращает (company, is_new)."""
+async def _upsert_company(
+    session: AsyncSession,
+    ogrn: str,
+    inn: str | None = None,
+    name: str | None = None,
+) -> tuple[Company, bool]:
+    """Возвращает (company, is_new). Имя из ЕГРЮЛ пишем сразу, не ждём Rusprofile."""
     existing = await session.scalar(select(Company).where(Company.ogrn == ogrn))
     if existing:
         existing.is_active = True
-        if inn and not existing.inn:
+        if inn:
             existing.inn = inn
+        if name:
+            existing.name = name
+            existing.short_name = name
         return existing, False
-    company = Company(ogrn=ogrn, inn=inn, rusprofile_url=rusprofile_url(ogrn))
+    company = Company(
+        ogrn=ogrn,
+        inn=inn,
+        name=name,
+        short_name=name,
+        rusprofile_url=rusprofile_url(ogrn),
+    )
     session.add(company)
     return company, True
 
@@ -712,13 +737,21 @@ async def _import_inns_and_add(
             errors.append(f"❌ {inn} — {err}")
             logger.warning("INN import fail %s: %s", inn, err)
         else:
-            company, is_new = await _upsert_company(session, result.ogrn, inn=inn)
+            company, is_new = await _upsert_company(
+                session, result.ogrn, inn=inn, name=result.name
+            )
             if is_new:
                 added += 1
                 new_ogrns.append(result.ogrn)
             ok += 1
             await session.commit()
-            logger.info("INN import ok %s -> %s (new=%s)", inn, result.ogrn, is_new)
+            logger.info(
+                "INN import ok %s -> %s (%s, new=%s)",
+                inn,
+                result.ogrn,
+                result.name,
+                is_new,
+            )
 
         if i % PROGRESS_EVERY == 0 or i == total:
             await message.answer(
@@ -742,7 +775,6 @@ async def _import_inns_and_add(
             f"Запускаю проверку недостоверок по {added} новым…\n"
             f"(остальные уже были в базе — их можно прогнать кнопкой «Проверить все»)"
         )
-        # проверяем только новые, чтобы не долбить все 170 сразу лишний раз
         for ogrn in new_ogrns:
             company = await session.scalar(select(Company).where(Company.ogrn == ogrn))
             if not company:
@@ -750,6 +782,10 @@ async def _import_inns_and_add(
             msgs = await check_company(session, client, company)
             if msgs:
                 await broadcast(session, message.bot, msgs)
+            elif company.last_error:
+                await message.answer(
+                    f"⚠️ {company_display(company)}\nПроверка карточки: {company.last_error}"
+                )
         await message.answer("Проверка новых завершена.")
 
 
@@ -758,7 +794,11 @@ async def _add_many_and_check(
 ) -> None:
     added = 0
     for ogrn in ids:
-        _, is_new = await _upsert_company(session, ogrn)
+        # имя сразу с ЕГРЮЛ
+        resolved = await client.egrul.resolve_inn(ogrn)
+        name = resolved.name if resolved.ogrn == ogrn else None
+        inn = resolved.inn if resolved.ogrn == ogrn else None
+        _, is_new = await _upsert_company(session, ogrn, inn=inn, name=name)
         if is_new:
             added += 1
     await session.commit()

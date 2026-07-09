@@ -211,6 +211,18 @@ async def check_company(session: AsyncSession, client: RusprofileClient, company
         logger.exception("Check failed for %s", company.ogrn)
         company.last_error = str(exc)
         company.last_checked_at = datetime.now(timezone.utc)
+        # Rusprofile недоступен (403 и т.п.) — имя хотя бы из ЕГРЮЛ
+        try:
+            query = company.inn or company.ogrn
+            resolved = await client.egrul.resolve_inn(query)
+            if resolved.ogrn == company.ogrn and resolved.name:
+                company.name = resolved.name
+                company.short_name = resolved.name
+            elif resolved.name and not company.short_name:
+                company.name = resolved.name
+                company.short_name = resolved.name
+        except Exception:
+            logger.exception("EGRUL name refresh failed for %s", company.ogrn)
         session.add(
             CheckResult(
                 company_id=company.id,

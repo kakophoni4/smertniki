@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 EGRUL_BASE = "https://egrul.nalog.ru"
 INN_RE = re.compile(r"^\d{10}(\d{2})?$")
+QUERY_RE = re.compile(r"^\d{10,15}$")
 
 
 @dataclass
@@ -35,31 +36,37 @@ def normalize_inn(value: str) -> str | None:
     return digits if INN_RE.match(digits) else None
 
 
-def parse_egrul_rows(payload: dict, inn: str) -> InnResolveResult:
+def normalize_query(value: str) -> str | None:
+    """ИНН (10/12) или ОГРН (13/15) — оба валидны для поиска ЕГРЮЛ."""
+    digits = re.sub(r"\D", "", value.strip())
+    return digits if QUERY_RE.match(digits) else None
+
+
+def parse_egrul_rows(payload: dict, query: str) -> InnResolveResult:
     rows = payload.get("rows") or []
     if not rows:
-        return InnResolveResult(inn=inn, ogrn=None, error="Не найдено в ЕГРЮЛ ФНС")
+        return InnResolveResult(inn=query, ogrn=None, error="Не найдено в ЕГРЮЛ ФНС")
 
     chosen = None
+    # точное совпадение по ИНН или ОГРН
     for row in rows:
-        if str(row.get("i") or "") == inn and str(row.get("k") or "") == "ul":
-            chosen = row
-            break
-    if chosen is None:
-        for row in rows:
-            if str(row.get("i") or "") == inn:
+        if str(row.get("i") or "") == query or str(row.get("o") or "") == query:
+            if str(row.get("k") or "") == "ul":
                 chosen = row
                 break
+            if chosen is None:
+                chosen = row
     if chosen is None:
         chosen = rows[0]
 
     ogrn = str(chosen.get("o") or "").strip()
     if not re.fullmatch(r"\d{13,15}", ogrn):
-        return InnResolveResult(inn=inn, ogrn=None, error="В ответе ЕГРЮЛ нет ОГРН")
+        return InnResolveResult(inn=query, ogrn=None, error="В ответе ЕГРЮЛ нет ОГРН")
 
-    name = chosen.get("n") or chosen.get("c")
+    inn = str(chosen.get("i") or "").strip() or (query if len(query) in (10, 12) else None)
+    name = chosen.get("c") or chosen.get("n")  # короткое имя предпочтительнее
     return InnResolveResult(
-        inn=inn,
+        inn=inn or query,
         ogrn=ogrn,
         name=name,
         final_url=f"https://www.rusprofile.ru/id/{ogrn}",
@@ -103,9 +110,10 @@ class EgrulClient:
             self._session = None
 
     async def resolve_inn(self, inn: str) -> InnResolveResult:
-        inn = normalize_inn(inn) or ""
-        if not inn:
-            return InnResolveResult(inn=inn, ogrn=None, error="Некорректный ИНН")
+        """Поиск по ИНН или ОГРН (ЕГРЮЛ принимает оба)."""
+        query = normalize_query(inn) or ""
+        if not query:
+            return InnResolveResult(inn=inn, ogrn=None, error="Некорректный ИНН/ОГРН")
         if not self._session:
             raise RuntimeError("EgrulClient not started")
 
@@ -113,12 +121,12 @@ class EgrulClient:
             await asyncio.sleep(settings.request_delay_sec)
             try:
                 data = {
-                    "query": inn,
+                    "query": query,
                     "vyp3CaptchaToken": "",
                     "page": "",
                     "PreventChromeAutocomplete": "",
                 }
-                logger.info("EGRUL POST search %s", inn)
+                logger.info("EGRUL POST search %s", query)
                 async with self._session.post(
                     f"{EGRUL_BASE}/",
                     data=data,
@@ -127,16 +135,15 @@ class EgrulClient:
                     body = await resp.text()
                     logger.info("EGRUL POST %s (%s bytes)", resp.status, len(body))
                     if resp.status >= 400:
-                        return InnResolveResult(inn=inn, ogrn=None, error=f"EGRUL HTTP {resp.status}")
+                        return InnResolveResult(inn=query, ogrn=None, error=f"EGRUL HTTP {resp.status}")
                     payload = await resp.json(content_type=None)
 
                 token = payload.get("t")
                 if not token:
                     if payload.get("captchaRequired"):
-                        return InnResolveResult(inn=inn, ogrn=None, error="ЕГРЮЛ требует капчу")
-                    return InnResolveResult(inn=inn, ogrn=None, error="ЕГРЮЛ не вернул token")
+                        return InnResolveResult(inn=query, ogrn=None, error="ЕГРЮЛ требует капчу")
+                    return InnResolveResult(inn=query, ogrn=None, error="ЕГРЮЛ не вернул token")
 
-                # результат иногда появляется с небольшой задержкой
                 result_payload = None
                 for attempt in range(4):
                     await asyncio.sleep(0.7 if attempt else 0.3)
@@ -152,14 +159,14 @@ class EgrulClient:
                             break
 
                 if not result_payload:
-                    return InnResolveResult(inn=inn, ogrn=None, error="ЕГРЮЛ: пустой результат")
+                    return InnResolveResult(inn=query, ogrn=None, error="ЕГРЮЛ: пустой результат")
 
-                result = parse_egrul_rows(result_payload, inn)
+                result = parse_egrul_rows(result_payload, query)
                 if result.ogrn:
-                    logger.info("EGRUL resolve %s -> %s (%s)", inn, result.ogrn, result.name)
+                    logger.info("EGRUL resolve %s -> %s (%s)", query, result.ogrn, result.name)
                 else:
-                    logger.warning("EGRUL miss %s: %s", inn, result.error)
+                    logger.warning("EGRUL miss %s: %s", query, result.error)
                 return result
             except Exception as exc:
-                logger.warning("EGRUL resolve failed for %s: %s", inn, exc)
-                return InnResolveResult(inn=inn, ogrn=None, error=str(exc))
+                logger.warning("EGRUL resolve failed for %s: %s", query, exc)
+                return InnResolveResult(inn=query, ogrn=None, error=str(exc))
