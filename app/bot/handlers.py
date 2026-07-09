@@ -33,7 +33,8 @@ from app.bot.keyboards import (
     check_menu,
     main_menu,
     shops_menu,
-    tickets_inline,
+    tickets_page_kb,
+    TICKETS_PAGE_SIZE,
     user_role_inline,
     users_menu,
 )
@@ -231,6 +232,48 @@ async def on_status(message: Message, session: AsyncSession) -> None:
     )
 
 
+async def _tickets_page_payload(
+    session: AsyncSession,
+    *,
+    page: int,
+    is_admin: bool,
+) -> tuple[str, InlineKeyboardMarkup | None, int]:
+    """Возвращает (text, keyboard, total_open). page 0-based."""
+    total = await session.scalar(
+        select(func.count()).select_from(Ticket).where(Ticket.status == TicketStatus.IN_PROGRESS)
+    ) or 0
+    if total == 0:
+        return "Открытых тикетов нет ✅", None, 0
+
+    page_size = TICKETS_PAGE_SIZE
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    offset = page * page_size
+
+    tickets = (
+        await session.scalars(
+            select(Ticket)
+            .where(Ticket.status == TicketStatus.IN_PROGRESS)
+            .order_by(Ticket.created_at.desc())
+            .offset(offset)
+            .limit(page_size)
+        )
+    ).all()
+
+    lines = [
+        f"🎫 <b>Открытые тикеты</b> — {total} шт.\n"
+        f"Страница <b>{page + 1}/{total_pages}</b>\n"
+    ]
+    for t in tickets:
+        company = await session.get(Company, t.company_id)
+        disp = company_display(company) if company else f"company#{t.company_id}"
+        inn = company.inn if company else "—"
+        lines.append(f"#{t.id} — {issue_label(t.issue_type)}\n{disp}\nИНН {inn}\n")
+
+    kb = tickets_page_kb(tickets, page=page, total_pages=total_pages, is_admin=is_admin)
+    return "\n".join(lines), kb, total
+
+
 @router.message(F.text == BTN_TICKETS)
 @router.message(Command("tickets"))
 async def on_tickets(message: Message, session: AsyncSession) -> None:
@@ -238,32 +281,50 @@ async def on_tickets(message: Message, session: AsyncSession) -> None:
     if not user:
         return
 
-    tickets = (
-        await session.scalars(
-            select(Ticket)
-            .where(Ticket.status == TicketStatus.IN_PROGRESS)
-            .order_by(Ticket.created_at.desc())
-            .limit(20)
-        )
-    ).all()
-    if not tickets:
-        await message.answer("Открытых тикетов нет ✅", reply_markup=main_menu(user.role))
+    is_admin = user.role == UserRole.ADMIN or is_config_admin(user.telegram_id)
+    text, kb, total = await _tickets_page_payload(session, page=0, is_admin=is_admin)
+    if total == 0:
+        await message.answer(text, reply_markup=main_menu(user.role))
+        return
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("tpage:"))
+async def cb_tickets_page(callback: CallbackQuery, session: AsyncSession) -> None:
+    if not callback.from_user or not callback.message or not callback.data:
+        return
+    if callback.data == "tpage:noop":
+        await callback.answer()
         return
 
-    lines = ["🎫 <b>Открытые тикеты</b>\n"]
-    for t in tickets:
-        company = await session.get(Company, t.company_id)
-        disp = company_display(company) if company else f"company#{t.company_id}"
-        ogrn = company.ogrn if company else "—"
-        lines.append(f"#{t.id} — {issue_label(t.issue_type)}\n{disp}\nОГРН {ogrn}\n")
+    user = await session.scalar(
+        select(AllowedUser).where(AllowedUser.telegram_id == callback.from_user.id, AllowedUser.is_active.is_(True))
+    )
+    if not user and not is_config_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
 
-    kb = tickets_inline(tickets) if user.role == UserRole.ADMIN else None
-    await message.answer("\n".join(lines), reply_markup=kb)
+    try:
+        page = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+
+    is_admin = bool(
+        user and (user.role == UserRole.ADMIN or is_config_admin(user.telegram_id))
+    ) or is_config_admin(callback.from_user.id)
+    text, kb, total = await _tickets_page_payload(session, page=page, is_admin=is_admin)
+    if total == 0:
+        await callback.message.edit_text(text)
+        await callback.answer()
+        return
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("heal:"))
 async def cb_heal(callback: CallbackQuery, session: AsyncSession) -> None:
-    if not callback.from_user or not callback.message:
+    if not callback.from_user or not callback.message or not callback.data:
         return
     user = await session.scalar(
         select(AllowedUser).where(AllowedUser.telegram_id == callback.from_user.id, AllowedUser.is_active.is_(True))
@@ -272,7 +333,10 @@ async def cb_heal(callback: CallbackQuery, session: AsyncSession) -> None:
         await callback.answer("Только админ", show_alert=True)
         return
 
-    ticket_id = int(callback.data.split(":")[1])
+    parts = callback.data.split(":")
+    ticket_id = int(parts[1])
+    page = int(parts[2]) if len(parts) > 2 else 0
+
     ticket = await session.get(Ticket, ticket_id)
     if not ticket:
         await callback.answer("Тикет не найден", show_alert=True)
@@ -292,7 +356,13 @@ async def cb_heal(callback: CallbackQuery, session: AsyncSession) -> None:
     msg = f"✅ Тикет #{ticket.id} закрыт («Вылечена»).\n{disp}\n{issue}"
     await broadcast(session, callback.bot, [msg])
     await callback.answer("Вылечено")
-    await callback.message.answer(msg)
+
+    is_admin = True
+    text, kb, total = await _tickets_page_payload(session, page=page, is_admin=is_admin)
+    if total == 0:
+        await callback.message.edit_text(text)
+    else:
+        await callback.message.edit_text(text, reply_markup=kb)
 
 
 # ─── submenus ────────────────────────────────────────────────────────────────

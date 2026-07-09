@@ -109,15 +109,33 @@ def cancel_menu() -> ReplyKeyboardMarkup:
     )
 
 
-def tickets_inline(tickets: list) -> InlineKeyboardMarkup:
-    rows = []
-    for t in tickets[:20]:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"✅ Вылечить #{t.id}",
-                    callback_data=f"heal:{t.id}",
-                )
-            ]
-        )
+TICKETS_PAGE_SIZE = 8
+
+
+def tickets_page_kb(
+    tickets: list,
+    *,
+    page: int,
+    total_pages: int,
+    is_admin: bool,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if is_admin:
+        for t in tickets:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"✅ Вылечить #{t.id}",
+                        callback_data=f"heal:{t.id}:{page}",
+                    )
+                ]
+            )
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"tpage:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="tpage:noop"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"tpage:{page + 1}"))
+    if nav:
+        rows.append(nav)
     return InlineKeyboardMarkup(inline_keyboard=rows)
