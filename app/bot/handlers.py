@@ -937,6 +937,8 @@ async def _import_inns_and_add(
 
 
 async def broadcast(session: AsyncSession, bot: Bot, messages: list[str]) -> None:
+    from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+
     users = (
         await session.scalars(
             select(AllowedUser).where(AllowedUser.is_active.is_(True), AllowedUser.notify.is_(True))
@@ -946,6 +948,19 @@ async def broadcast(session: AsyncSession, bot: Bot, messages: list[str]) -> Non
         for u in users:
             try:
                 await bot.send_message(u.telegram_id, text, disable_web_page_preview=True)
+            except (TelegramForbiddenError, TelegramBadRequest) as exc:
+                # chat not found / bot blocked / user never pressed /start
+                msg = str(exc).lower()
+                if "chat not found" in msg or "blocked" in msg or "forbidden" in msg or "user is deactivated" in msg:
+                    logger.warning(
+                        "Disable notify for %s: %s (нужен /start у бота или неверный ID)",
+                        u.telegram_id,
+                        exc,
+                    )
+                    u.notify = False
+                    await session.commit()
+                else:
+                    logger.warning("Failed to notify %s: %s", u.telegram_id, exc)
             except Exception:
                 logger.exception("Failed to notify %s", u.telegram_id)
 
