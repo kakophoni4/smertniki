@@ -233,24 +233,128 @@ def parse_vypiska_text(text: str, ogrn: str) -> CompanySnapshot:
         snap.unreliable_address = True
         snap.signals.append("выписка: недостоверность (без точной секции→адрес)")
 
-    # ликвидация / исключение
-    if re.search(r"предстоящем исключении юридического лица из егрюл", low):
-        snap.is_liquidating = True
-        snap.status_text = "Предстоящее исключение из ЕГРЮЛ"
-        snap.signals.append("выписка: предстоящее исключение")
-    elif re.search(r"в процессе ликвидации", low):
-        snap.is_liquidating = True
-        snap.status_text = "В процессе ликвидации"
-        snap.signals.append("выписка: ликвидация")
-    elif re.search(r"исключен[оа]?\s+из\s+егрюл|ликвидирован", low):
-        snap.is_liquidated = True
-        snap.status_text = "Исключено / ликвидировано"
-        snap.signals.append("выписка: исключено/ликвидировано")
-    elif not snap.status_text:
+    _apply_liquidation_flags(snap, flat)
+
+    if not snap.status_text:
         snap.status_text = "Действующая" if not snap.has_any_issue() else "Есть отметки в ЕГРЮЛ"
 
     snap.raw_summary = "; ".join(snap.signals) if snap.signals else "ok"
     return snap
+
+
+def _date_sort_key(date_ru: str) -> str:
+    """DD.MM.YYYY → YYYYMMDD для сортировки."""
+    m = re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4})", date_ru)
+    if not m:
+        return "00000000"
+    d, mo, y = m.groups()
+    return f"{y}{mo}{d}"
+
+
+def _liquidation_from_status_section(flat: str) -> tuple[str | None, str | None]:
+    """Актуальный блок «Сведения о состоянии» — приоритетный источник.
+
+    Returns (state, signal) where state in {liquidating, liquidated, clear} or None if no section.
+    """
+    m = re.search(
+        r"Сведения о состоянии юридического лица(.+?)(?:Сведения о записях|Сведения о видах|Сведения об|$)",
+        flat,
+        flags=re.I | re.S,
+    )
+    if not m:
+        return None, None
+    body = m.group(1).lower()
+    if re.search(r"предстоящем исключении", body):
+        return "liquidating", "выписка: предстоящее исключение (состояние)"
+    if re.search(r"в процессе ликвидации", body):
+        return "liquidating", "выписка: ликвидация (состояние)"
+    if re.search(r"исключен[оа]?\s+из\s+егрюл|ликвидирован", body):
+        return "liquidated", "выписка: исключено/ликвидировано (состояние)"
+    # Секция есть, но без ликвидации — текущий статус чистый, историю не смотрим
+    return "clear", None
+
+
+def _liquidation_from_journal(flat: str) -> tuple[str | None, str | None]:
+    """Хронология записей ЕГРЮЛ: последнее релевантное событие побеждает.
+
+    «Предстоящее исключение» + позже возражение / снятие → не ликвидация.
+    """
+    parts = re.split(r"Причина внесения записи в ЕГРЮЛ", flat, flags=re.I)
+    if len(parts) < 2:
+        return None, None
+
+    events: list[tuple[str, int, str]] = []
+    for idx, part in enumerate(parts[1:]):
+        low = part.lower()
+        dm = re.search(r"(\d{2}\.\d{2}\.\d{4})", part)
+        sort_key = _date_sort_key(dm.group(1) if dm else "")
+
+        kind: str | None = None
+        # возражение против исключения (не путать с самим исключением)
+        if re.search(
+            r"затрагиваются в связи с исключением|заявление лица,\s*чьи права|заявление лицом,\s*чьи права",
+            low,
+        ):
+            kind = "objection"
+        elif "предстоящем исключении" in low or "решение о предстоящем исключении" in low:
+            kind = "pending"
+        elif "в процессе ликвидации" in low:
+            kind = "liquidating_process"
+        elif re.search(r"исключен[оа]?\s+из\s+егрюл", low) or re.search(
+            r"ликвидация юридического лица|ликвидирован[оа]?", low
+        ):
+            kind = "excluded"
+
+        if kind:
+            events.append((sort_key, idx, kind))
+
+    if not events:
+        return None, None
+
+    state: str | None = None
+    signal: str | None = None
+    for _, _, kind in sorted(events, key=lambda x: (x[0], x[1])):
+        if kind in ("pending", "liquidating_process"):
+            state = "liquidating"
+            signal = (
+                "выписка: предстоящее исключение"
+                if kind == "pending"
+                else "выписка: ликвидация"
+            )
+        elif kind == "objection":
+            state = None
+            signal = None
+        elif kind == "excluded":
+            state = "liquidated"
+            signal = "выписка: исключено/ликвидировано"
+    return state, signal
+
+
+def _apply_liquidation_flags(snap: CompanySnapshot, flat: str) -> None:
+    """Ликвидация/исключение: сначала актуальный статус, иначе журнал записей.
+
+    Нельзя искать «предстоящем исключении» по всему PDF — фраза остаётся
+    в истории даже после возражения и продолжения деятельности.
+    """
+    state, signal = _liquidation_from_status_section(flat)
+    if state is None:
+        state, signal = _liquidation_from_journal(flat)
+
+    if state == "liquidating":
+        snap.is_liquidating = True
+        snap.status_text = (
+            "В процессе ликвидации"
+            if signal and "ликвидация" in signal and "предстоящее" not in signal
+            else "Предстоящее исключение из ЕГРЮЛ"
+        )
+        if signal:
+            snap.signals.append(signal)
+    elif state == "liquidated":
+        snap.is_liquidated = True
+        snap.status_text = "Исключено / ликвидировано"
+        if signal:
+            snap.signals.append(signal)
+    # state == "clear" или None — флагов нет
 
 
 class EgrulClient:
