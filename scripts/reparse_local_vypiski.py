@@ -41,7 +41,7 @@ async def main(dry_run: bool) -> None:
         ).all()
         logger.info("active companies: %s, dir: %s", len(companies), vypiski)
 
-        ok = missing = errors = changed_liq = 0
+        ok = missing = errors = changed = 0
         for company in companies:
             pdf_path = vypiski / f"{company.ogrn}.pdf"
             if not pdf_path.exists():
@@ -56,16 +56,26 @@ async def main(dry_run: bool) -> None:
                 logger.exception("parse failed %s: %s", company.ogrn, exc)
                 continue
 
-            prev_liq = bool(company.is_liquidating or company.is_liquidated)
-            new_liq = bool(snap.is_liquidating or snap.is_liquidated)
-            if prev_liq != new_liq:
-                changed_liq += 1
+            prev = {
+                "addr": bool(company.unreliable_address),
+                "dir": bool(company.unreliable_director),
+                "found": bool(company.unreliable_founder),
+                "liq": bool(company.is_liquidating or company.is_liquidated),
+            }
+            new = {
+                "addr": bool(snap.unreliable_address),
+                "dir": bool(snap.unreliable_director),
+                "found": bool(snap.unreliable_founder),
+                "liq": bool(snap.is_liquidating or snap.is_liquidated),
+            }
+            if prev != new:
+                changed += 1
                 logger.info(
-                    "LIQ change inn=%s ogrn=%s %s -> %s signals=%s",
+                    "FLAGS inn=%s ogrn=%s %s -> %s signals=%s",
                     company.inn,
                     company.ogrn,
-                    prev_liq,
-                    new_liq,
+                    prev,
+                    new,
                     snap.signals,
                 )
 
@@ -78,24 +88,26 @@ async def main(dry_run: bool) -> None:
 
         from sqlalchemy import func
 
-        open_liq_n = await session.scalar(
-            select(func.count())
-            .select_from(Ticket)
-            .where(Ticket.status == TicketStatus.IN_PROGRESS, Ticket.issue_type == "liquidation")
-        )
+        open_by = {}
+        for issue in ("address", "director", "founder", "liquidation"):
+            open_by[issue] = await session.scalar(
+                select(func.count())
+                .select_from(Ticket)
+                .where(Ticket.status == TicketStatus.IN_PROGRESS, Ticket.issue_type == issue)
+            )
         open_all = await session.scalar(
             select(func.count()).select_from(Ticket).where(Ticket.status == TicketStatus.IN_PROGRESS)
         )
 
         logger.info(
-            "done ok=%s missing_pdf=%s errors=%s liq_flag_changes=%s dry_run=%s",
+            "done ok=%s missing_pdf=%s errors=%s flag_changes=%s dry_run=%s",
             ok,
             missing,
             errors,
-            changed_liq,
+            changed,
             dry_run,
         )
-        logger.info("tickets_open_liquidation=%s tickets_open_all=%s", open_liq_n, open_all)
+        logger.info("tickets_open=%s by_type=%s", open_all, open_by)
 
 
 if __name__ == "__main__":

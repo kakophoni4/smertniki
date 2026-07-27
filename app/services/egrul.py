@@ -148,16 +148,35 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     return "\n".join(parts)
 
 
+def _split_current_and_journal(flat: str) -> tuple[str, str]:
+    """Актуальные сведения vs журнал «Сведения о записях».
+
+    Исторические формулировки живут в журнале навсегда — по ним нельзя
+    ставить текущие флаги недостоверности/ликвидации без хронологии.
+    """
+    m = re.search(
+        r"Сведения о записях(?:,\s*внесенных в Единый государственный реестр[^.]*)?",
+        flat,
+        flags=re.I,
+    )
+    if not m:
+        return flat, ""
+    return flat[: m.start()], flat[m.start() :]
+
+
 def parse_vypiska_text(text: str, ogrn: str) -> CompanySnapshot:
     """Разбор текста выписки ЕГРЮЛ (из PDF)."""
     snap = CompanySnapshot(ogrn=ogrn)
     flat = _norm_space(text)
-    low = flat.lower()
+    current, journal = _split_current_and_journal(flat)
+
+    # имя / ИНН / адрес — из актуальной части (fallback на весь текст)
+    scope = current or flat
 
     # имя
     m = re.search(
         r"сведения о юридическом лице\s+(ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ\s+\"[^\"]+\"|[А-ЯA-Z0-9\"«»\-\s]{5,120}?)\s+ОГРН",
-        flat,
+        scope,
         flags=re.I,
     )
     if m:
@@ -172,30 +191,44 @@ def parse_vypiska_text(text: str, ogrn: str) -> CompanySnapshot:
         else:
             snap.short_name = snap.name
     if not snap.short_name:
-        m = re.search(r'ООО\s*"([^"]+)"', flat)
+        m = re.search(r'ООО\s*"([^"]+)"', scope)
         if m:
             snap.short_name = f'ООО "{m.group(1)}"'
             snap.name = snap.short_name
 
     # ИНН
-    m = re.search(r"ИНН юридического лица\s+(\d{10})", flat)
+    m = re.search(r"ИНН юридического лица\s+(\d{10})", scope)
     if m:
         snap.inn = m.group(1)
     else:
-        m = re.search(r"\bИНН\b\s+(\d{10})", flat)
+        m = re.search(r"\bИНН\b\s+(\d{10})", scope)
         if m:
             snap.inn = m.group(1)
 
     # адрес
-    m = re.search(r"Адрес юридического лица\s+(.+?)(?:\d+\s+)?(?:ГРН и дата|Дополнительные сведения|Сведения о)", flat)
+    m = re.search(
+        r"Адрес юридического лица\s+(.+?)(?:\d+\s+)?(?:ГРН и дата|Дополнительные сведения|Сведения о)",
+        scope,
+    )
     if m:
         snap.address = _norm_space(m.group(1))[:500]
 
-    # --- недостоверки: позиционно по секциям ---
+    _apply_unreliable_flags(snap, scope)
+    _apply_liquidation_flags(snap, current=scope, journal=journal or flat)
+
+    if not snap.status_text:
+        snap.status_text = "Действующая" if not snap.has_any_issue() else "Есть отметки в ЕГРЮЛ"
+
+    snap.raw_summary = "; ".join(snap.signals) if snap.signals else "ok"
+    return snap
+
+
+def _apply_unreliable_flags(snap: CompanySnapshot, current: str) -> None:
+    """Недостоверности только из актуальной части выписки (не из журнала записей)."""
     # После адреса часто идёт «Дополнительные сведения сведения недостоверны»
     addr_block = re.search(
-        r"Адрес юридического лица(.+?)(?:Сведения о лице, имеющем право|Сведения о состоянии|Сведения об учредителях)",
-        flat,
+        r"Адрес юридического лица(.+?)(?:Сведения о лице, имеющем право|Сведения о состоянии|Сведения об (?:участниках|учредителях)|$)",
+        current,
         flags=re.I | re.S,
     )
     if addr_block and re.search(r"сведения недостоверны", addr_block.group(1), flags=re.I):
@@ -204,42 +237,57 @@ def parse_vypiska_text(text: str, ogrn: str) -> CompanySnapshot:
 
     # Блок директора / лица без доверенности
     dir_block = re.search(
-        r"Сведения о лице, имеющем право без доверенности(.+?)(?:Сведения об учредителях|Сведения о количестве|Сведения о держателе|Сведения о состоянии|Сведения о видах)",
-        flat,
+        r"Сведения о лице, имеющем право без доверенности(.+?)(?:Сведения об (?:участниках|учредителях)|Сведения о количестве|Сведения о держателе|Сведения о состоянии|Сведения о видах|$)",
+        current,
         flags=re.I | re.S,
     )
     if dir_block and re.search(r"сведения недостоверны", dir_block.group(1), flags=re.I):
         snap.unreliable_director = True
         snap.signals.append("выписка: недостоверность ДЛ")
 
-    # Учредители
+    # Учредители / участники
     found_block = re.search(
-        r"Сведения об учредителях(.+?)(?:Сведения о количестве|Сведения о держателе|Сведения о состоянии|Сведения о видах|Сведения о записях)",
-        flat,
+        r"Сведения об (?:участниках\s*/\s*)?учредителях(.+?)(?:Сведения о количестве|Сведения о держателе|Сведения о состоянии|Сведения о видах|Сведения о записях|$)",
+        current,
         flags=re.I | re.S,
     )
     if found_block and re.search(r"сведения недостоверны", found_block.group(1), flags=re.I):
         snap.unreliable_founder = True
         snap.signals.append("выписка: недостоверность учредителя")
 
-    # fallback: если есть «сведения недостоверны» но секции не поймали — хотя бы адрес
+    # Fallback только по актуальной части и только точная формулировка ФНС —
+    # больше не сканируем весь PDF (иначе журнал = ложные тикеты).
     if (
         not snap.unreliable_address
         and not snap.unreliable_director
         and not snap.unreliable_founder
-        and re.search(r"сведения недостоверны", low)
     ):
-        # эвристика: первая недостоверность обычно адрес
-        snap.unreliable_address = True
-        snap.signals.append("выписка: недостоверность (без точной секции→адрес)")
-
-    _apply_liquidation_flags(snap, flat)
-
-    if not snap.status_text:
-        snap.status_text = "Действующая" if not snap.has_any_issue() else "Есть отметки в ЕГРЮЛ"
-
-    snap.raw_summary = "; ".join(snap.signals) if snap.signals else "ok"
-    return snap
+        for m in re.finditer(
+            r"дополнительные сведения\s+сведения недостоверны",
+            current,
+            flags=re.I,
+        ):
+            before = current[: m.start()].lower()
+            headers = [
+                (before.rfind("адрес юридического лица"), "address"),
+                (before.rfind("имеющем право без доверенности"), "director"),
+                (before.rfind("сведения об учредителях"), "founder"),
+                (before.rfind("сведения об участниках"), "founder"),
+            ]
+            headers = [h for h in headers if h[0] >= 0]
+            if not headers:
+                continue
+            kind = max(headers, key=lambda x: x[0])[1]
+            if kind == "address":
+                snap.unreliable_address = True
+                snap.signals.append("выписка: недостоверность адреса")
+            elif kind == "director":
+                snap.unreliable_director = True
+                snap.signals.append("выписка: недостоверность ДЛ")
+            else:
+                snap.unreliable_founder = True
+                snap.signals.append("выписка: недостоверность учредителя")
+            break
 
 
 def _date_sort_key(date_ru: str) -> str:
@@ -330,15 +378,20 @@ def _liquidation_from_journal(flat: str) -> tuple[str | None, str | None]:
     return state, signal
 
 
-def _apply_liquidation_flags(snap: CompanySnapshot, flat: str) -> None:
-    """Ликвидация/исключение: сначала актуальный статус, иначе журнал записей.
+def _apply_liquidation_flags(
+    snap: CompanySnapshot,
+    *,
+    current: str,
+    journal: str,
+) -> None:
+    """Ликвидация/исключение: актуальный статус, иначе хронология журнала.
 
     Нельзя искать «предстоящем исключении» по всему PDF — фраза остаётся
     в истории даже после возражения и продолжения деятельности.
     """
-    state, signal = _liquidation_from_status_section(flat)
+    state, signal = _liquidation_from_status_section(current)
     if state is None:
-        state, signal = _liquidation_from_journal(flat)
+        state, signal = _liquidation_from_journal(journal or current)
 
     if state == "liquidating":
         snap.is_liquidating = True
