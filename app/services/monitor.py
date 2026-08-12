@@ -1,4 +1,5 @@
 import logging
+import random
 import re
 from datetime import datetime, timezone
 
@@ -359,6 +360,47 @@ async def check_all_companies(session: AsyncSession, client: RusprofileClient) -
     return all_msgs
 
 
+# шаблоны нагоняя: {age_html} = "<b>75 дней</b>"
+DEXTER_NAG_LINES = (
+    "Декстер, хватит пинать хуи — иди сука решай вопросы, прошло уже {age_html}",
+    "Декстер, опять это висит {age_html}. Встань и закрой тему, не геройствуй в чате",
+    "Йоу Декстер, недостоверка гниёт уже {age_html}. Хватит смотреть — сделай",
+    "Декстер, будильник: прошло {age_html}. Вопросы сами себя не решат",
+    "Декстер, это не «потом», это уже {age_html}. Шевелись",
+    "Эй Декстер, тикет протух на {age_html}. Иди чини, а не кофе мешай",
+    "Декстер, ФНС тебя не ждёт: {age_html} недостоверки. Разгребай",
+    "Декстер, легенда прокрастинации: {age_html} и всё ещё «в работе». Закрой уже",
+    "Декстер, пинг под жопу: {age_html} без движения. Пора в бой",
+    "Декстер, хватит кормить тикет пылью — висит {age_html}. Решай",
+    "Декстер, календарь орёт: {age_html}. Недостоверность сама не отвалится",
+    "Декстер, это уже не «чуть-чуть», это {age_html}. Давай без оправданий",
+    "Декстер, ау: {age_html} тикет ждёт тебя как долг коллектора. Закрой",
+    "Декстер, сервис устал ждать: {age_html}. Иди сука работай",
+    "Декстер, не спи — {age_html} недостоверки на тебе. Погнали",
+    "Декстер, снова напоминаю красиво: прошло {age_html}. Хватит тянуть",
+    "Декстер, жопа горит уже {age_html}. Туши вопросом, не статусом «увидел»",
+    "Декстер, тикет древнее мамонта: {age_html}. Пора в музей — или в «вылечено»",
+    "Декстер, не игнорь: {age_html} и счётчик растёт. Сделай дело",
+    "Декстер, weekly kick: {age_html} без прогресса. Двигай жопу к ЕГРЮЛ",
+    "Декстер, это не дзен, это забитый тикет на {age_html}. Разберись",
+    "Декстер, босс-музыка играет {age_html}. Пора побеждать недостоверку",
+    "Декстер, дружеский пинок: висит {age_html}. Хватит пинать хуи — решай",
+    "Декстер, напоминалка со вкусом: {age_html}. Иди закрой, пока не стало хуже",
+)
+
+
+def _dexter_nag_opener(age: int, *, used: set[int]) -> str:
+    """Случайная уникальная строка в рамках одной рассылки."""
+    age_html = f"<b>{age} {days_word(age)}</b>"
+    free = [i for i in range(len(DEXTER_NAG_LINES)) if i not in used]
+    if not free:
+        used.clear()
+        free = list(range(len(DEXTER_NAG_LINES)))
+    idx = random.choice(free)
+    used.add(idx)
+    return DEXTER_NAG_LINES[idx].format(age_html=age_html)
+
+
 async def build_stale_ticket_nags(session: AsyncSession) -> list[str]:
     """Еженедельный пинг: недостоверность висит дольше STALE_TICKET_DAYS."""
     now = datetime.now(timezone.utc)
@@ -375,6 +417,7 @@ async def build_stale_ticket_nags(session: AsyncSession) -> list[str]:
     ).all()
 
     msgs: list[str] = []
+    used_lines: set[int] = set()
     for t in tickets:
         start = ticket_issue_start(t)
         age = ticket_age_days(start, now=now)
@@ -387,9 +430,9 @@ async def build_stale_ticket_nags(session: AsyncSession) -> list[str]:
         inn = company.inn if company else "—"
         ogrn = company.ogrn if company else "—"
         since_s = start.date().isoformat() if start else "—"
+        opener = _dexter_nag_opener(age, used=used_lines)
         msgs.append(
-            "Декстер хватить пинать хуи, иди сука решай вопросы — "
-            f"прошло уже <b>{age} {days_word(age)}</b>\n\n"
+            f"{opener}\n\n"
             f"{issue_label(t.issue_type)}\n"
             f"{disp}\n"
             f"ИНН {inn} / ОГРН {ogrn}\n"
