@@ -254,15 +254,29 @@ def _parse_ru_date(value: str) -> datetime | None:
 
 
 def _unreliable_since_from_block(block: str) -> datetime | None:
-    """Дата внесения отметки о недостоверности (ГРН/дата сразу после фразы)."""
+    """Дата внесения отметки о недостоверности (ГРН/дата сразу после фразы).
+
+    Нельзя брать первую попавшуюся DD.MM.YYYY — в PDF часто рядом дата
+    формирования выписки из колонтитула (ложный «сегодня»).
+    """
     m = re.search(
-        r"сведения недостоверны.{0,240}?(\d{2}\.\d{2}\.\d{4})",
+        r"сведения недостоверны.{0,500}?"
+        r"ГРН и дата внесения(?:\s+в\s+ЕГРЮЛ)?[^0-9]{0,80}?"
+        r"(?:\d{13,15}\s+)?(\d{2}\.\d{2}\.\d{4})",
         block,
         flags=re.I | re.S,
     )
-    if not m:
-        return None
-    return _parse_ru_date(m.group(1))
+    if m:
+        return _parse_ru_date(m.group(1))
+    # запасной вариант: дата сразу после номера ГРН рядом с фразой
+    m = re.search(
+        r"сведения недостоверны.{0,300}?\b(\d{13,15})\s+(\d{2}\.\d{2}\.\d{4})",
+        block,
+        flags=re.I | re.S,
+    )
+    if m:
+        return _parse_ru_date(m.group(2))
+    return None
 
 
 def _apply_unreliable_flags(snap: CompanySnapshot, current: str) -> None:
