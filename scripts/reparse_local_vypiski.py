@@ -71,12 +71,37 @@ async def main(dry_run: bool) -> None:
             if prev != new:
                 changed += 1
                 logger.info(
-                    "FLAGS inn=%s ogrn=%s %s -> %s signals=%s",
+                    "FLAGS inn=%s ogrn=%s %s -> %s signals=%s since=%s",
                     company.inn,
                     company.ogrn,
                     prev,
                     new,
                     snap.signals,
+                    {
+                        "addr": snap.unreliable_address_since.date().isoformat()
+                        if snap.unreliable_address_since
+                        else None,
+                        "dir": snap.unreliable_director_since.date().isoformat()
+                        if snap.unreliable_director_since
+                        else None,
+                        "found": snap.unreliable_founder_since.date().isoformat()
+                        if snap.unreliable_founder_since
+                        else None,
+                    },
+                )
+            elif snap.unreliable_address or snap.unreliable_director or snap.unreliable_founder:
+                logger.info(
+                    "SINCE inn=%s addr=%s dir=%s found=%s",
+                    company.inn,
+                    snap.unreliable_address_since.date().isoformat()
+                    if snap.unreliable_address_since
+                    else None,
+                    snap.unreliable_director_since.date().isoformat()
+                    if snap.unreliable_director_since
+                    else None,
+                    snap.unreliable_founder_since.date().isoformat()
+                    if snap.unreliable_founder_since
+                    else None,
                 )
 
             if dry_run:

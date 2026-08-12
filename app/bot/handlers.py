@@ -51,6 +51,7 @@ from app.services.monitor import (
     issue_label,
     rusprofile_url,
     ticket_age_days,
+    ticket_issue_start,
 )
 from app.services.rusprofile_client import RusprofileClient, normalize_inn
 
@@ -329,14 +330,16 @@ async def _tickets_page_payload(
         company = await session.get(Company, t.company_id)
         disp = company_display(company) if company else f"company#{t.company_id}"
         inn = company.inn if company else "—"
-        age = ticket_age_days(t.created_at, now=now)
+        start = ticket_issue_start(t)
+        age = ticket_age_days(start, now=now)
         age_mark = f"⏳ {age} {days_word(age)}"
         if age >= settings.stale_ticket_days:
             age_mark = f"🔥 {age} {days_word(age)}"
+        since_s = start.date().isoformat() if start else "—"
         lines.append(
             f"#{t.id} — {issue_label(t.issue_type)}\n"
             f"{disp}\nИНН {inn}\n"
-            f"{age_mark}\n"
+            f"{age_mark} (с {since_s})\n"
         )
 
     kb = tickets_page_kb(

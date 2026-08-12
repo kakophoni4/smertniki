@@ -151,6 +151,8 @@ def test_active_unreliable_in_current_section_still_flags():
     ИНН юридического лица 7700000003
     Адрес юридического лица 101000, Г.МОСКВА, УЛ. ТВЕРСКАЯ, Д. 1
     Дополнительные сведения сведения недостоверны (результаты проверки достоверности содержащихся в ЕГРЮЛ сведений о юридическом лице)
+    9 ГРН и дата внесения в ЕГРЮЛ записи, содержащей указанные сведения 2267702489998
+    31.03.2026
     Сведения о лице, имеющем право без доверенности действовать от имени юридического лица
     ИВАНОВ ИВАН ИВАНОВИЧ Должность ГЕНЕРАЛЬНЫЙ ДИРЕКТОР
     Сведения об учредителях юридического лица
@@ -163,3 +165,5 @@ def test_active_unreliable_in_current_section_still_flags():
     assert snap.unreliable_address is True
     assert snap.unreliable_director is False
     assert snap.is_liquidating is False
+    assert snap.unreliable_address_since is not None
+    assert snap.unreliable_address_since.date().isoformat() == "2026-03-31"

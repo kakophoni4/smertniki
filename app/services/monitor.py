@@ -73,6 +73,31 @@ def ticket_age_days(created_at: datetime | None, *, now: datetime | None = None)
     return max(0, (now - created).days)
 
 
+def ticket_issue_start(ticket: Ticket) -> datetime | None:
+    """Дата начала проблемы: из выписки (issue_since), иначе created_at тикета."""
+    return ticket.issue_since or ticket.created_at
+
+
+def issue_since_from_company(company: Company, issue_type: str) -> datetime | None:
+    if issue_type == IssueType.ADDRESS:
+        return company.unreliable_address_since
+    if issue_type == IssueType.DIRECTOR:
+        return company.unreliable_director_since
+    if issue_type == IssueType.FOUNDER:
+        return company.unreliable_founder_since
+    return None
+
+
+def issue_since_from_snap(snap: CompanySnapshot, issue_type: str) -> datetime | None:
+    if issue_type == IssueType.ADDRESS:
+        return snap.unreliable_address_since
+    if issue_type == IssueType.DIRECTOR:
+        return snap.unreliable_director_since
+    if issue_type == IssueType.FOUNDER:
+        return snap.unreliable_founder_since
+    return None
+
+
 def company_display(company: Company) -> str:
     name = company.short_name or company.name or "Без названия"
     inn = company.inn or "—"
@@ -131,6 +156,9 @@ async def apply_snapshot(session: AsyncSession, company: Company, snap: CompanyS
     company.unreliable_address = snap.unreliable_address
     company.unreliable_director = snap.unreliable_director
     company.unreliable_founder = snap.unreliable_founder
+    company.unreliable_address_since = snap.unreliable_address_since if snap.unreliable_address else None
+    company.unreliable_director_since = snap.unreliable_director_since if snap.unreliable_director else None
+    company.unreliable_founder_since = snap.unreliable_founder_since if snap.unreliable_founder else None
     company.is_liquidating = snap.is_liquidating
     company.is_liquidated = snap.is_liquidated
     company.last_checked_at = now
@@ -156,8 +184,11 @@ async def apply_snapshot(session: AsyncSession, company: Company, snap: CompanyS
 
     for issue_type, is_active in curr.items():
         was_active = prev.get(issue_type, False)
+        since = issue_since_from_snap(snap, issue_type)
         if is_active and not was_active:
-            notifications.extend(await _open_issue(session, company, issue_type))
+            notifications.extend(await _open_issue(session, company, issue_type, since=since))
+        elif is_active and was_active:
+            await _refresh_open_ticket_since(session, company, issue_type, since=since)
         elif not is_active and was_active:
             notifications.extend(await _heal_issue(session, company, issue_type))
 
@@ -165,7 +196,33 @@ async def apply_snapshot(session: AsyncSession, company: Company, snap: CompanyS
     return notifications
 
 
-async def _open_issue(session: AsyncSession, company: Company, issue_type: str) -> list[str]:
+async def _refresh_open_ticket_since(
+    session: AsyncSession,
+    company: Company,
+    issue_type: str,
+    *,
+    since: datetime | None,
+) -> None:
+    if since is None:
+        return
+    existing = await session.scalar(
+        select(Ticket).where(
+            Ticket.company_id == company.id,
+            Ticket.issue_type == issue_type,
+            Ticket.status == TicketStatus.IN_PROGRESS,
+        )
+    )
+    if existing and existing.issue_since != since:
+        existing.issue_since = since
+
+
+async def _open_issue(
+    session: AsyncSession,
+    company: Company,
+    issue_type: str,
+    *,
+    since: datetime | None = None,
+) -> list[str]:
     existing = await session.scalar(
         select(Ticket).where(
             Ticket.company_id == company.id,
@@ -174,6 +231,8 @@ async def _open_issue(session: AsyncSession, company: Company, issue_type: str) 
         )
     )
     if existing:
+        if since and existing.issue_since != since:
+            existing.issue_since = since
         return []
 
     title = f"{issue_label(issue_type)} — {company_display(company)}"
@@ -183,6 +242,7 @@ async def _open_issue(session: AsyncSession, company: Company, issue_type: str) 
         status=TicketStatus.IN_PROGRESS,
         title=title,
         details=f"ИНН {company.inn or '—'}\nОГРН {company.ogrn}\n{rusprofile_url(company.ogrn)}",
+        issue_since=since or issue_since_from_company(company, issue_type),
     )
     session.add(ticket)
     await session.flush()
@@ -316,7 +376,8 @@ async def build_stale_ticket_nags(session: AsyncSession) -> list[str]:
 
     msgs: list[str] = []
     for t in tickets:
-        age = ticket_age_days(t.created_at, now=now)
+        start = ticket_issue_start(t)
+        age = ticket_age_days(start, now=now)
         if age < threshold:
             continue
         company = await session.get(Company, t.company_id)
@@ -325,13 +386,14 @@ async def build_stale_ticket_nags(session: AsyncSession) -> list[str]:
         disp = company_display(company) if company else f"company#{t.company_id}"
         inn = company.inn if company else "—"
         ogrn = company.ogrn if company else "—"
+        since_s = start.date().isoformat() if start else "—"
         msgs.append(
             "Декстер хватить пинать хуи, иди сука решай вопросы — "
             f"прошло уже <b>{age} {days_word(age)}</b>\n\n"
             f"{issue_label(t.issue_type)}\n"
             f"{disp}\n"
             f"ИНН {inn} / ОГРН {ogrn}\n"
-            f"Тикет #{t.id} висит с {t.created_at.date().isoformat() if t.created_at else '—'}\n"
+            f"Тикет #{t.id} · недостоверность с {since_s}\n"
             f"{rusprofile_url(ogrn) if ogrn != '—' else ''}"
         )
     return msgs

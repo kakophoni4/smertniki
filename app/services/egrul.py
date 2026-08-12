@@ -16,6 +16,7 @@ import io
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
@@ -52,6 +53,9 @@ class CompanySnapshot:
     unreliable_address: bool = False
     unreliable_director: bool = False
     unreliable_founder: bool = False
+    unreliable_address_since: datetime | None = None
+    unreliable_director_since: datetime | None = None
+    unreliable_founder_since: datetime | None = None
     is_liquidating: bool = False
     is_liquidated: bool = False
     signals: list[str] = field(default_factory=list)
@@ -79,6 +83,21 @@ class CompanySnapshot:
             "unreliable_address": self.unreliable_address,
             "unreliable_director": self.unreliable_director,
             "unreliable_founder": self.unreliable_founder,
+            "unreliable_address_since": (
+                self.unreliable_address_since.date().isoformat()
+                if self.unreliable_address_since
+                else None
+            ),
+            "unreliable_director_since": (
+                self.unreliable_director_since.date().isoformat()
+                if self.unreliable_director_since
+                else None
+            ),
+            "unreliable_founder_since": (
+                self.unreliable_founder_since.date().isoformat()
+                if self.unreliable_founder_since
+                else None
+            ),
             "is_liquidating": self.is_liquidating,
             "is_liquidated": self.is_liquidated,
             "signals": self.signals,
@@ -223,6 +242,29 @@ def parse_vypiska_text(text: str, ogrn: str) -> CompanySnapshot:
     return snap
 
 
+def _parse_ru_date(value: str) -> datetime | None:
+    m = re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4})", value.strip())
+    if not m:
+        return None
+    d, mo, y = m.groups()
+    try:
+        return datetime(int(y), int(mo), int(d), tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _unreliable_since_from_block(block: str) -> datetime | None:
+    """Дата внесения отметки о недостоверности (ГРН/дата сразу после фразы)."""
+    m = re.search(
+        r"сведения недостоверны.{0,240}?(\d{2}\.\d{2}\.\d{4})",
+        block,
+        flags=re.I | re.S,
+    )
+    if not m:
+        return None
+    return _parse_ru_date(m.group(1))
+
+
 def _apply_unreliable_flags(snap: CompanySnapshot, current: str) -> None:
     """Недостоверности только из актуальной части выписки (не из журнала записей)."""
     # После адреса часто идёт «Дополнительные сведения сведения недостоверны»
@@ -233,6 +275,7 @@ def _apply_unreliable_flags(snap: CompanySnapshot, current: str) -> None:
     )
     if addr_block and re.search(r"сведения недостоверны", addr_block.group(1), flags=re.I):
         snap.unreliable_address = True
+        snap.unreliable_address_since = _unreliable_since_from_block(addr_block.group(1))
         snap.signals.append("выписка: недостоверность адреса")
 
     # Блок директора / лица без доверенности
@@ -243,6 +286,7 @@ def _apply_unreliable_flags(snap: CompanySnapshot, current: str) -> None:
     )
     if dir_block and re.search(r"сведения недостоверны", dir_block.group(1), flags=re.I):
         snap.unreliable_director = True
+        snap.unreliable_director_since = _unreliable_since_from_block(dir_block.group(1))
         snap.signals.append("выписка: недостоверность ДЛ")
 
     # Учредители / участники
@@ -253,6 +297,7 @@ def _apply_unreliable_flags(snap: CompanySnapshot, current: str) -> None:
     )
     if found_block and re.search(r"сведения недостоверны", found_block.group(1), flags=re.I):
         snap.unreliable_founder = True
+        snap.unreliable_founder_since = _unreliable_since_from_block(found_block.group(1))
         snap.signals.append("выписка: недостоверность учредителя")
 
     # Fallback только по актуальной части и только точная формулировка ФНС —
@@ -278,14 +323,18 @@ def _apply_unreliable_flags(snap: CompanySnapshot, current: str) -> None:
             if not headers:
                 continue
             kind = max(headers, key=lambda x: x[0])[1]
+            since = _unreliable_since_from_block(current[m.start() : m.start() + 400])
             if kind == "address":
                 snap.unreliable_address = True
+                snap.unreliable_address_since = since
                 snap.signals.append("выписка: недостоверность адреса")
             elif kind == "director":
                 snap.unreliable_director = True
+                snap.unreliable_director_since = since
                 snap.signals.append("выписка: недостоверность ДЛ")
             else:
                 snap.unreliable_founder = True
+                snap.unreliable_founder_since = since
                 snap.signals.append("выписка: недостоверность учредителя")
             break
 

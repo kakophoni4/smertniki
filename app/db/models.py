@@ -66,6 +66,10 @@ class Company(Base):
     unreliable_address: Mapped[bool] = mapped_column(Boolean, default=False)
     unreliable_director: Mapped[bool] = mapped_column(Boolean, default=False)
     unreliable_founder: Mapped[bool] = mapped_column(Boolean, default=False)
+    # дата отметки из выписки ЕГРЮЛ (ГРН/дата у «сведения недостоверны»)
+    unreliable_address_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unreliable_director_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unreliable_founder_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_liquidating: Mapped[bool] = mapped_column(Boolean, default=False)
     is_liquidated: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -92,6 +96,8 @@ class Ticket(Base):
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     closed_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # дата появления проблемы по выписке (если распарсили); иначе = created_at
+    issue_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
