@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
 
 from app.config import settings
 from app.db.models import Company, Ticket, TicketStatus
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, init_db
 from app.services.egrul import extract_text_from_pdf, parse_vypiska_text
 from app.services.monitor import apply_snapshot
 
@@ -34,6 +34,7 @@ logger = logging.getLogger("reparse")
 
 
 async def main(dry_run: bool) -> None:
+    await init_db()
     vypiski = Path(settings.vypiski_dir)
     async with SessionLocal() as session:
         companies = (

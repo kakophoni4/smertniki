@@ -12,6 +12,9 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 
 def _ensure_sqlite_columns(sync_conn) -> None:
     """create_all не добавляет колонки в существующие таблицы — докидываем вручную."""
+    import logging
+
+    log = logging.getLogger(__name__)
     if sync_conn.dialect.name != "sqlite":
         return
     insp = inspect(sync_conn)
@@ -25,10 +28,12 @@ def _ensure_sqlite_columns(sync_conn) -> None:
         ):
             if col not in cols:
                 sync_conn.execute(text(f"ALTER TABLE companies ADD COLUMN {col} DATETIME"))
+                log.info("SQLite migrated: companies.%s", col)
     if "tickets" in tables:
         cols = {c["name"] for c in insp.get_columns("tickets")}
         if "issue_since" not in cols:
             sync_conn.execute(text("ALTER TABLE tickets ADD COLUMN issue_since DATETIME"))
+            log.info("SQLite migrated: tickets.issue_since")
 
 
 async def init_db() -> None:
