@@ -40,10 +40,11 @@ async def main() -> None:
     scheduler = create_scheduler(bot, client)
     scheduler.start()
     logger.info(
-        "Scheduler started: check=%s nag=%s (>%sd) tz=%s",
+        "Scheduler started: check=%s nag=%s (>%sd) nag_to=%s tz=%s",
         settings.check_cron,
         settings.stale_nag_cron,
         settings.stale_ticket_days,
+        settings.stale_nag_id_list or "NONE",
         settings.timezone,
     )
 

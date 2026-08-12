@@ -1087,7 +1087,21 @@ async def _import_inns_and_add(
         await message.answer("Проверка новых завершена.")
 
 
+async def _send_messages_to_ids(bot: Bot, telegram_ids: list[int], messages: list[str]) -> None:
+    from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+
+    for text in messages:
+        for tg_id in telegram_ids:
+            try:
+                await bot.send_message(tg_id, text, disable_web_page_preview=True)
+            except (TelegramForbiddenError, TelegramBadRequest) as exc:
+                logger.warning("Failed to notify %s: %s", tg_id, exc)
+            except Exception:
+                logger.exception("Failed to notify %s", tg_id)
+
+
 async def broadcast(session: AsyncSession, bot: Bot, messages: list[str]) -> None:
+    """Обычные алерты ЕГРЮЛ — всем с notify=1."""
     from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
     users = (
@@ -1114,6 +1128,16 @@ async def broadcast(session: AsyncSession, bot: Bot, messages: list[str]) -> Non
                     logger.warning("Failed to notify %s: %s", u.telegram_id, exc)
             except Exception:
                 logger.exception("Failed to notify %s", u.telegram_id)
+
+
+async def broadcast_stale_nags(bot: Bot, messages: list[str]) -> int:
+    """Пинги Декстера — только STALE_NAG_IDS из .env (не всем подряд)."""
+    ids = settings.stale_nag_id_list
+    if not ids:
+        logger.warning("STALE_NAG_IDS пуст — пинги никому не отправлены")
+        return 0
+    await _send_messages_to_ids(bot, ids, messages)
+    return len(ids)
 
 
 def setup_dispatcher(dp: Dispatcher) -> None:

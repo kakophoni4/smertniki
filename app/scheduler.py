@@ -42,16 +42,20 @@ def create_scheduler(bot: Bot, client: RusprofileClient) -> AsyncIOScheduler:
                 logger.info("Scheduled check: no new alerts")
 
     async def scheduled_stale_nags() -> None:
-        logger.info("Stale ticket nag started (threshold=%s days)", settings.stale_ticket_days)
-        from app.bot.handlers import broadcast
+        logger.info(
+            "Stale ticket nag started (threshold=%s days, recipients=%s)",
+            settings.stale_ticket_days,
+            settings.stale_nag_id_list or "NONE",
+        )
+        from app.bot.handlers import broadcast_stale_nags
 
         async with SessionLocal() as session:
             msgs = await build_stale_ticket_nags(session)
-            if msgs:
-                await broadcast(session, bot, msgs)
-                logger.info("Stale nag: %s alerts", len(msgs))
-            else:
+            if not msgs:
                 logger.info("Stale nag: nothing to ping")
+                return
+            n_recv = await broadcast_stale_nags(bot, msgs)
+            logger.info("Stale nag: %s alerts → %s recipients", len(msgs), n_recv)
 
     scheduler.add_job(
         scheduled_check,

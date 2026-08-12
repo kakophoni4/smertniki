@@ -20,12 +20,20 @@ class Settings(BaseSettings):
     stale_ticket_days: int = 60
     # cron еженедельного пинга (по умолчанию пн 11:00)
     stale_nag_cron: str = "0 11 * * 1"
+    # кому слать пинги Декстера (telegram id через запятую). Пусто = никому (не всем подряд)
+    stale_nag_ids: str = ""
 
     @property
     def admin_id_list(self) -> list[int]:
         if not self.admin_ids.strip():
             return []
         return [int(x.strip()) for x in self.admin_ids.split(",") if x.strip()]
+
+    @property
+    def stale_nag_id_list(self) -> list[int]:
+        if not self.stale_nag_ids.strip():
+            return []
+        return [int(x.strip()) for x in self.stale_nag_ids.split(",") if x.strip()]
 
 
 settings = Settings()
