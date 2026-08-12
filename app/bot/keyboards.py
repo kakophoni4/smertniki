@@ -111,6 +111,32 @@ def cancel_menu() -> ReplyKeyboardMarkup:
 
 TICKETS_PAGE_SIZE = 8
 
+# callback itype: address|director|founder|liquidation|all
+TICKET_TYPE_ORDER = ("address", "director", "founder", "liquidation", "all")
+TICKET_TYPE_LABELS = {
+    "address": "🏠 Адрес",
+    "director": "👤 ДЛ",
+    "founder": "👥 Учредитель",
+    "liquidation": "💀 Ликвидация",
+    "all": "📋 Все",
+}
+
+
+def tickets_types_kb(counts: dict[str, int]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for itype in TICKET_TYPE_ORDER:
+        n = counts.get(itype, 0)
+        label = TICKET_TYPE_LABELS[itype]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{label} — {n}",
+                    callback_data=f"ttype:{itype}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def tickets_page_kb(
     tickets: list,
@@ -118,6 +144,7 @@ def tickets_page_kb(
     page: int,
     total_pages: int,
     is_admin: bool,
+    itype: str = "all",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if is_admin:
@@ -126,16 +153,17 @@ def tickets_page_kb(
                 [
                     InlineKeyboardButton(
                         text=f"✅ Вылечить #{t.id}",
-                        callback_data=f"heal:{t.id}:{page}",
+                        callback_data=f"heal:{t.id}:{itype}:{page}",
                     )
                 ]
             )
     nav: list[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"tpage:{page - 1}"))
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"tpage:{itype}:{page - 1}"))
     nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="tpage:noop"))
     if page + 1 < total_pages:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"tpage:{page + 1}"))
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"tpage:{itype}:{page + 1}"))
     if nav:
         rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⬅️ К типам", callback_data="tcat")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

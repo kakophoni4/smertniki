@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     vypiski_dir: str = "./data/vypiski"
     # сколько последних check_results хранить на лавку (остальное удаляем)
     keep_check_results: int = 5
+    # через сколько дней недостоверности начинать еженедельно пинать
+    stale_ticket_days: int = 60
+    # cron еженедельного пинга (по умолчанию пн 11:00)
+    stale_nag_cron: str = "0 11 * * 1"
 
     @property
     def admin_id_list(self) -> list[int]:

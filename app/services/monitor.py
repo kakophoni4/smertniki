@@ -43,6 +43,36 @@ def issue_label(issue_type: str) -> str:
     }.get(issue_type, issue_type)
 
 
+# недостоверности, по которым пингуем Декстера
+STALE_NAG_ISSUE_TYPES = (
+    IssueType.ADDRESS,
+    IssueType.DIRECTOR,
+    IssueType.FOUNDER,
+)
+
+
+def days_word(n: int) -> str:
+    n_abs = abs(n) % 100
+    if 11 <= n_abs <= 14:
+        return "дней"
+    last = n_abs % 10
+    if last == 1:
+        return "день"
+    if 2 <= last <= 4:
+        return "дня"
+    return "дней"
+
+
+def ticket_age_days(created_at: datetime | None, *, now: datetime | None = None) -> int:
+    if created_at is None:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    created = created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return max(0, (now - created).days)
+
+
 def company_display(company: Company) -> str:
     name = company.short_name or company.name or "Без названия"
     inn = company.inn or "—"
@@ -267,3 +297,41 @@ async def check_all_companies(session: AsyncSession, client: RusprofileClient) -
         msgs = await check_company(session, client, company)
         all_msgs.extend(msgs)
     return all_msgs
+
+
+async def build_stale_ticket_nags(session: AsyncSession) -> list[str]:
+    """Еженедельный пинг: недостоверность висит дольше STALE_TICKET_DAYS."""
+    now = datetime.now(timezone.utc)
+    threshold = max(1, settings.stale_ticket_days)
+    tickets = (
+        await session.scalars(
+            select(Ticket)
+            .where(
+                Ticket.status == TicketStatus.IN_PROGRESS,
+                Ticket.issue_type.in_(STALE_NAG_ISSUE_TYPES),
+            )
+            .order_by(Ticket.created_at.asc())
+        )
+    ).all()
+
+    msgs: list[str] = []
+    for t in tickets:
+        age = ticket_age_days(t.created_at, now=now)
+        if age < threshold:
+            continue
+        company = await session.get(Company, t.company_id)
+        if company is not None and not company.is_active:
+            continue
+        disp = company_display(company) if company else f"company#{t.company_id}"
+        inn = company.inn if company else "—"
+        ogrn = company.ogrn if company else "—"
+        msgs.append(
+            "Декстер хватить пинать хуи, иди сука решай вопросы — "
+            f"прошло уже <b>{age} {days_word(age)}</b>\n\n"
+            f"{issue_label(t.issue_type)}\n"
+            f"{disp}\n"
+            f"ИНН {inn} / ОГРН {ogrn}\n"
+            f"Тикет #{t.id} висит с {t.created_at.date().isoformat() if t.created_at else '—'}\n"
+            f"{rusprofile_url(ogrn) if ogrn != '—' else ''}"
+        )
+    return msgs
