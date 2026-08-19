@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     stale_nag_cron: str = "0 11 * * 1"
     # кому слать пинги Декстера (telegram id через запятую). Пусто = никому (не всем подряд)
     stale_nag_ids: str = ""
+    crm_api_token: str = ""
+    crm_api_host: str = "0.0.0.0"
+    crm_api_port: int = 8088
 
     @property
     def admin_id_list(self) -> list[int]:

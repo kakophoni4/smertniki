@@ -43,13 +43,13 @@ from app.bot.keyboards import (
 from app.bot.states import Form
 from app.config import settings
 from app.db.models import AllowedUser, Company, IssueType, Ticket, TicketStatus, UserRole
+from app.services.companies import upsert_company
 from app.services.monitor import (
     check_all_companies,
     check_company,
     company_display,
     days_word,
     issue_label,
-    rusprofile_url,
     ticket_age_days,
     ticket_issue_start,
 )
@@ -987,38 +987,6 @@ async def _read_document_text(message: Message) -> str | None:
     return buf.read().decode("utf-8", errors="replace")
 
 
-async def _upsert_company(
-    session: AsyncSession,
-    ogrn: str,
-    inn: str | None = None,
-    name: str | None = None,
-) -> tuple[Company, bool]:
-    existing = None
-    if inn:
-        existing = await session.scalar(select(Company).where(Company.inn == inn))
-    if not existing:
-        existing = await session.scalar(select(Company).where(Company.ogrn == ogrn))
-    if existing:
-        existing.is_active = True
-        existing.ogrn = ogrn
-        if inn:
-            existing.inn = inn
-        if name:
-            existing.name = name
-            existing.short_name = name
-        existing.rusprofile_url = rusprofile_url(ogrn)
-        return existing, False
-    company = Company(
-        ogrn=ogrn,
-        inn=inn,
-        name=name,
-        short_name=name,
-        rusprofile_url=rusprofile_url(ogrn),
-    )
-    session.add(company)
-    return company, True
-
-
 async def _import_inns_and_add(
     message: Message,
     session: AsyncSession,
@@ -1050,7 +1018,7 @@ async def _import_inns_and_add(
             errors.append(f"❌ {inn} — {err}")
             logger.warning("INN import fail %s: %s", inn, err)
         else:
-            _, is_new = await _upsert_company(session, result.ogrn, inn=inn, name=result.name)
+            _, is_new = await upsert_company(session, result.ogrn, inn=inn, name=result.name)
             if is_new:
                 added += 1
                 new_ogrns.append(result.ogrn)

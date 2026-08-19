@@ -49,4 +49,21 @@ docker compose logs -f
 app/services/egrul.py              — ФНС: поиск + выписка + парсер
 app/services/rusprofile_client.py  — фасад (внутри ЕГРЮЛ)
 app/bot/                           — Telegram UI
+app/api.py                         — HTTP API для CRM (токен CRM_API_TOKEN)
 ```
+
+## HTTP API для CRM
+
+Если задан `CRM_API_TOKEN`, бот поднимает HTTP на `CRM_API_HOST:CRM_API_PORT` (по умолчанию `0.0.0.0:8088`).
+
+Авторизация: `Authorization: Bearer <CRM_API_TOKEN>`.
+
+- `GET /api/v1/companies` — лавки по порядку добавления
+- `POST /api/v1/companies/inns` — `{ "inns": ["7700…"], "check_new": true }`
+- `PATCH /api/v1/companies/{id}` — ИНН / выключить
+- `POST /api/v1/companies/{id}/check` — проверить одну
+- `POST /api/v1/companies/check-all` — проверка всех (фон, 202)
+- `GET /api/v1/tickets` — тикеты, старые открытые первыми (`created_at.asc`)
+- `POST /api/v1/tickets` — создать
+- `POST /api/v1/tickets/{id}/heal` — «вылечена»
+

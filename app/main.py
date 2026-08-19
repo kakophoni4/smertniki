@@ -8,6 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
+from app.api import start_crm_api
 from app.bot.handlers import setup_dispatcher
 from app.bot.middleware import DbMiddleware, RusprofileMiddleware
 from app.config import settings
@@ -39,6 +40,7 @@ async def main() -> None:
 
     scheduler = create_scheduler(bot, client)
     scheduler.start()
+    api_runner = await start_crm_api(client)
     logger.info(
         "Scheduler started: check=%s nag=%s (>%sd) nag_to=%s tz=%s",
         settings.check_cron,
@@ -52,6 +54,8 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
+        if api_runner is not None:
+            await api_runner.cleanup()
         await client.close()
         await bot.session.close()
 

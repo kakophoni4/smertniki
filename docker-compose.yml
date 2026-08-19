@@ -7,5 +7,9 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+    ports:
+      - "${CRM_API_PORT:-8088}:8088"
     environment:
       DATABASE_URL: sqlite+aiosqlite:///./data/bot.db
+      CRM_API_HOST: 0.0.0.0
+      CRM_API_PORT: 8088
